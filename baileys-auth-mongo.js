@@ -5,6 +5,7 @@
 // ============================================================
 
 const mongoose = require('mongoose');
+const { BufferJSON, initAuthCreds } = require('@whiskeysockets/baileys');
 
 // ─── Schema ──────────────────────────────────────────────────
 const AuthKeySchema = new mongoose.Schema({
@@ -15,13 +16,9 @@ const AuthKeySchema = new mongoose.Schema({
 const AuthKey = mongoose.models.AuthKey || mongoose.model('AuthKey', AuthKeySchema);
 
 // ─── Core helpers ────────────────────────────────────────────
-const toJSON = (data) => JSON.parse(JSON.stringify(data, (_, v) =>
-  v?.type === 'Buffer' ? { type: 'Buffer', data: Array.from(v.data ?? []) } : v
-));
-
-const fromJSON = (data) => JSON.parse(JSON.stringify(data), (_, v) =>
-  v && typeof v === 'object' && v.type === 'Buffer' ? Buffer.from(v.data) : v
-);
+// Use Baileys native replacer and reviver to correctly handle Uint8Array
+const toJSON = (data) => JSON.parse(JSON.stringify(data, BufferJSON.replacer));
+const fromJSON = (data) => JSON.parse(JSON.stringify(data), BufferJSON.reviver);
 
 // ─── Main factory ────────────────────────────────────────────
 async function useMongoDBAuthState() {
@@ -43,7 +40,17 @@ async function useMongoDBAuthState() {
   };
 
   // Load or create creds
-  const creds = (await readData('creds')) || initAuthCreds();
+  let creds = await readData('creds');
+  
+  // Auto-recovery: If creds exist but are corrupted (e.g. from previous bad JSON serialization),
+  // clear the database to force a fresh start.
+  if (creds && creds.noiseKey && !(creds.noiseKey.private instanceof Uint8Array)) {
+    console.log('🧹 Corrupted auth credentials detected. Clearing old session data...');
+    await AuthKey.deleteMany({});
+    creds = initAuthCreds();
+  } else if (!creds) {
+    creds = initAuthCreds();
+  }
 
   return {
     state: {
@@ -78,34 +85,6 @@ async function useMongoDBAuthState() {
       await writeData('creds', creds);
     },
   };
-}
-
-// ─── Baileys initAuthCreds (inline to avoid deep import issues)
-function initAuthCreds() {
-  // Baileys will populate this on first connection
-  return {
-    noiseKey: generateKeyPair(),
-    signedIdentityKey: generateKeyPair(),
-    signedPreKey: { keyPair: generateKeyPair(), signature: Buffer.alloc(64), keyId: 1 },
-    registrationId: Math.floor(Math.random() * 16383) + 1,
-    advSecretKey: randomBytes(32).toString('base64'),
-    nextPreKeyId: 1,
-    firstUnuploadedPreKeyId: 1,
-    accountSyncCounter: 0,
-    accountSettings: { unarchiveChats: false },
-  };
-}
-
-// Simple crypto helpers (fallback if Baileys helpers not importable)
-const crypto = require('crypto');
-const { Curve } = require('@whiskeysockets/baileys');
-
-function generateKeyPair() {
-  return Curve.generateKeyPair();
-}
-
-function randomBytes(n) {
-  return crypto.randomBytes(n);
 }
 
 module.exports = { useMongoDBAuthState };
