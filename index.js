@@ -57,42 +57,67 @@ app.get('/', (req, res) => {
   });
 });
 
-// ── QR Code page ─────────────────────────────────────────────
-app.get('/qr', async (req, res) => {
+// ── QR Image API (returns latest QR as base64 JSON) ──────────
+app.get('/qr-image', async (req, res) => {
+  if (isConnected) return res.json({ connected: true });
+  if (!latestQR)   return res.json({ connected: false, qr: null });
+  try {
+    const qrImage = await QRCode.toDataURL(latestQR, { errorCorrectionLevel: 'H', width: 400 });
+    res.json({ connected: false, qr: qrImage });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── QR Code page (Live — updates every 5s without page reload) ─
+app.get('/qr', (req, res) => {
   if (isConnected) {
     return res.send('<h2 style="font-family:sans-serif;color:green">✅ WhatsApp is Connected! No QR needed.</h2>');
   }
-  if (!latestQR) {
-    return res.send('<h2 style="font-family:sans-serif;color:orange">⏳ QR not ready yet. Refresh in 10 seconds...</h2>');
-  }
-  try {
-    const qrImage = await QRCode.toDataURL(latestQR, { errorCorrectionLevel: 'H', width: 400 });
-    res.send(`
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <title>Ishaanaa Bot — Scan QR</title>
-          <meta http-equiv="refresh" content="15">
-          <style>
-            body { font-family: sans-serif; display: flex; flex-direction: column;
-                   align-items: center; justify-content: center; min-height: 100vh;
-                   background: #111; color: #eee; margin: 0; }
-            h1 { color: #25D366; }
-            p  { color: #aaa; margin-bottom: 24px; }
-            img { border: 4px solid #25D366; border-radius: 12px; }
-          </style>
-        </head>
-        <body>
-          <h1>🌸 Ishaanaa Bot</h1>
-          <p>Open WhatsApp Business → Settings → Linked Devices → Link a Device</p>
-          <img src="${qrImage}" width="350" />
-          <p style="margin-top:16px;font-size:12px">Page auto-refreshes every 30s</p>
-        </body>
-      </html>
-    `);
-  } catch (e) {
-    res.status(500).send('QR generation failed: ' + e.message);
-  }
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <title>Ishaanaa Bot — Scan QR</title>
+  <style>
+    body { font-family:sans-serif; display:flex; flex-direction:column;
+           align-items:center; justify-content:center; min-height:100vh;
+           background:#111; color:#eee; margin:0; }
+    h1   { color:#25D366; }
+    p    { color:#aaa; margin-bottom:24px; }
+    img  { border:4px solid #25D366; border-radius:12px; }
+    #status { font-size:13px; color:#888; margin-top:12px; }
+  </style>
+</head>
+<body>
+  <h1>🌸 Ishaanaa Bot</h1>
+  <p>WhatsApp Business → Settings → Linked Devices → Link a Device</p>
+  <div id="qrContainer"><p style="color:orange">⏳ Loading QR Code...</p></div>
+  <p id="status">Updating every 5 seconds...</p>
+  <script>
+    async function refreshQR() {
+      try {
+        const res  = await fetch('/qr-image');
+        const data = await res.json();
+        const box  = document.getElementById('qrContainer');
+        const st   = document.getElementById('status');
+        if (data.connected) {
+          box.innerHTML = '<h2 style="color:#25D366">✅ WhatsApp Connected!</h2>';
+          st.textContent = 'Bot is live! You can close this tab.';
+          return;
+        }
+        if (data.qr) {
+          box.innerHTML = '<img src="' + data.qr + '" width="350" />';
+          st.textContent = '✅ Fresh QR — Updated at ' + new Date().toLocaleTimeString() + '. Scan now!';
+        } else {
+          box.innerHTML = '<p style="color:orange">⏳ Waiting for QR from WhatsApp...</p>';
+        }
+      } catch(e) { console.error(e); }
+    }
+    refreshQR();
+    setInterval(refreshQR, 5000);
+  </script>
+</body>
+</html>`);
 });
 
 // ── POS Invoice API ──────────────────────────────────────────
