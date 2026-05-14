@@ -351,10 +351,10 @@ async function handleLocation(phone, locationMsg, jid) {
   // Check distance from studio
   const distanceKm = getDistance(
     latitude, longitude,
-    config.STUDIO_LAT, config.STUDIO_LNG
+    config.STUDIO.lat, config.STUDIO.lng
   );
 
-  const isNearStudio = distanceKm <= config.GEOFENCE_RADIUS_KM;
+  const isNearStudio = distanceKm <= (config.STUDIO.radius / 1000); // Convert meters to km
 
   if (!isNearStudio) {
     await sendText(jid,
@@ -383,7 +383,7 @@ async function handleLocation(phone, locationMsg, jid) {
     // ── Check OUT ────────────────────────────────────────────
     const checkInTime = dayjs(`${dayjs().format('YYYY-MM-DD')} ${record.check_in}`, 'YYYY-MM-DD hh:mm A');
     const hoursWorked = now.diff(checkInTime, 'minute') / 60;
-    const finalStatus = hoursWorked >= config.MIN_HOURS ? 'Full Day' : 'Half Day';
+    const finalStatus = hoursWorked >= config.SHIFT.minHours ? 'Full Day' : 'Half Day';
 
     await db.checkOut(emp._id, timeStr, hoursWorked, finalStatus);
     await sendText(jid,
@@ -493,17 +493,40 @@ function setupSchedules() {
     }
   });
 
-  // Evening report to manager at 7:30 PM
-  schedule.scheduleJob('30 19 * * 1-6', async () => {
+  // Evening report to manager at 9:30 PM
+  schedule.scheduleJob('30 21 * * 1-6', async () => {
     try {
       const report = await reports.todayTextReport();
-      await sendText(MANAGER_JID, `📊 *Evening Attendance Report*\n\n${report}`);
+      await sendText(MANAGER_JID, `📊 *Daily Attendance Report*\n\n${report}`);
     } catch (e) {
       console.error('Report error:', e.message);
     }
   });
 
-  console.log('📅 Schedules set: 9:00 AM reminders, 7:30 PM report');
+  // Auto-mark Absent at 1:00 PM if no check-in
+  schedule.scheduleJob('0 13 * * 1-6', async () => {
+    try {
+      const employees = await db.getAllEmployees();
+      let absentees = [];
+      
+      for (const emp of employees) {
+        const record = await db.getTodayRecord(emp._id);
+        if (!record) {
+          await db.markAbsent(emp._id);
+          absentees.push(emp.name);
+          console.log(`📍 Marked ${emp.name} as Absent (No check-in by 1PM)`);
+        }
+      }
+
+      if (absentees.length > 0) {
+        await sendText(MANAGER_JID, `⚠️ *Absent Alert*\n\nThe following employees have not checked in by 1:00 PM and are marked as Absent:\n\n- ${absentees.join('\n- ')}`);
+      }
+    } catch (e) {
+      console.error('Auto-absent error:', e.message);
+    }
+  });
+
+  console.log('📅 Schedules set: 9:00 AM reminders, 1:00 PM auto-absent, 9:30 PM report');
 }
 
 // ============================================================
@@ -532,7 +555,7 @@ function getDistance(lat1, lon1, lat2, lon2) {
 function toRad(deg) { return deg * Math.PI / 180; }
 
 function isLate(time) {
-  const cutoff = dayjs().hour(config.LATE_HOUR).minute(config.LATE_MINUTE).second(0);
+  const cutoff = dayjs().hour(config.SHIFT.lateAfterHour).minute(config.SHIFT.lateAfterMin).second(0);
   return time.isAfter(cutoff);
 }
 
