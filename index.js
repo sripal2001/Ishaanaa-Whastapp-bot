@@ -120,25 +120,6 @@ app.get('/qr', (req, res) => {
 </html>`);
 });
 
-// ── Admin: Manual Mark Today (Temporary) ──────────────────────
-app.get('/api/admin/mark-today-present', async (req, res) => {
-  try {
-    const employees = await db.getAllEmployees();
-    const today = dayjs().format('YYYY-MM-DD');
-    let count = 0;
-    for (const emp of employees) {
-      const existing = await db.getTodayRecord(emp._id);
-      if (!existing) {
-        await db.checkIn(emp._id, '10:00 AM', 'Present');
-        count++;
-      }
-    }
-    res.send(`✅ Successfully marked ${count} employees as present for today!`);
-  } catch (err) {
-    res.status(500).send(err.message);
-  }
-});
-
 // ── POS Invoice API ──────────────────────────────────────────
 // Called by the Flutter POS app after every sale
 app.post('/api/send-invoice', async (req, res) => {
@@ -598,6 +579,22 @@ async function start() {
 
   // Sync employees
   await db.upsertEmployees(config.EMPLOYEES);
+
+  // One-time fix: Mark everyone as present for today (2026-05-14)
+  // so they can check out this evening.
+  try {
+    const employees = await db.getAllEmployees();
+    const today = dayjs().format('YYYY-MM-DD');
+    for (const emp of employees) {
+      const existing = await db.getTodayRecord(emp._id);
+      if (!existing) {
+        await db.checkIn(emp._id, '10:00 AM', 'Present');
+        console.log(`📍 Startup: Marked ${emp.name} as Present for today.`);
+      }
+    }
+  } catch (err) {
+    console.error('Startup mark error:', err.message);
+  }
 
   // Setup daily schedules
   setupSchedules();
