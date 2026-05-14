@@ -407,6 +407,34 @@ async function handleManagerCommand(lower, text, jid) {
     return;
   }
 
+  if (lower === 'status' || lower === 'live') {
+    const statusReport = await reports.statusTextReport();
+    await sendText(jid, statusReport);
+    return;
+  }
+
+  if (lower === 'excel' || lower === 'sheet') {
+    try {
+      await sendText(jid, '📊 Generating Excel report for this month...');
+      const now = dayjs();
+      const filepath = await reports.generateMonthlyExcel(now.year(), now.month() + 1);
+      const filename = path.basename(filepath);
+      
+      await sock.sendMessage(jid, {
+        document: fs.readFileSync(filepath),
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        fileName: filename,
+        caption: `📅 Attendance Report for ${now.format('MMMM YYYY')}`
+      });
+      
+      // Cleanup
+      setTimeout(() => fs.unlink(filepath, () => {}), 2000);
+    } catch (e) {
+      await sendText(jid, `❌ Error generating Excel: ${e.message}`);
+    }
+    return;
+  }
+
   if (lower.startsWith('approve ')) {
     const name = text.slice(8).trim();
     const emp = await db.getEmployeeByName(name);
@@ -439,6 +467,8 @@ async function handleManagerCommand(lower, text, jid) {
     await sendText(jid,
       `🤖 *Manager Commands*\n\n` +
       `*report* — Today's attendance summary\n` +
+      `*status* — Real-time studio status\n` +
+      `*excel* — Get monthly Excel report file\n` +
       `*approve [name]* — Approve leave\n` +
       `*reject [name]* — Reject leave\n` +
       `*help* — Show this menu`
