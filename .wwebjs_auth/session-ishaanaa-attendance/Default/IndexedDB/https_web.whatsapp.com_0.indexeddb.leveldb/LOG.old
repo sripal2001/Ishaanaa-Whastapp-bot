@@ -1,0 +1,56 @@
+2026/05/12-22:28:20.377 3160 Reusing MANIFEST C:\Users\sripal\.gemini\antigravity\scratch\ishaanaa-attendance\.wwebjs_auth\session-ishaanaa-attendance\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/05/12-22:28:20.404 3160 Recovering log #2970
+2026/05/12-22:28:20.416 3160 Reusing old log C:\Users\sripal\.gemini\antigravity\scratch\ishaanaa-attendance\.wwebjs_auth\session-ishaanaa-attendance\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/002970.log 
+2026/05/12-22:28:21.302 3a14 Compacting 1@0 + 1@1 files
+2026/05/12-22:28:21.328 3a14 Generated table #2973@0: 12412 keys, 154216 bytes
+2026/05/12-22:28:21.333 3a14 Generated table #2974@0: 183 keys, 9055 bytes
+2026/05/12-22:28:21.368 3a14 Generated table #2975@0: 8180 keys, 488472 bytes
+2026/05/12-22:28:21.369 3a14 Compacted 1@0 + 1@1 files => 651743 bytes
+2026/05/12-22:28:21.370 3a14 compacted to: files[ 0 3 38 0 0 0 0 ]
+2026/05/12-22:28:21.371 3a14 Delete type=2 #2936
+2026/05/12-22:28:21.371 3a14 Delete type=2 #2971
+2026/05/12-22:28:22.125 628c Compacting 1@1 + 4@2 files
+2026/05/12-22:28:22.293 628c Generated table #2976@1: 83576 keys, 2231615 bytes
+2026/05/12-22:28:22.436 628c Generated table #2977@1: 57336 keys, 2283678 bytes
+2026/05/12-22:28:22.606 628c Generated table #2978@1: 57994 keys, 2219428 bytes
+2026/05/12-22:28:22.750 628c Generated table #2979@1: 37203 keys, 2195280 bytes
+2026/05/12-22:28:22.750 628c Compacted 1@1 + 4@2 files => 8930001 bytes
+2026/05/12-22:28:22.751 628c compacted to: files[ 0 2 38 0 0 0 0 ]
+2026/05/12-22:28:24.206 628c Compacting 1@1 + 8@2 files
+2026/05/12-22:28:24.270 628c Generated table #2980@1: 2550 keys, 2149183 bytes
+2026/05/12-22:28:24.407 628c Generated table #2981@1: 37337 keys, 2204304 bytes
+2026/05/12-22:28:24.566 628c Generated table #2982@1: 29305 keys, 2261601 bytes
+2026/05/12-22:28:24.699 628c Generated table #2983@1: 28255 keys, 2263436 bytes
+2026/05/12-22:28:24.852 628c Generated table #2984@1: 29416 keys, 2257457 bytes
+2026/05/12-22:28:24.998 628c Generated table #2985@1: 29674 keys, 2249403 bytes
+2026/05/12-22:28:25.089 628c Generated table #2986@1: 21361 keys, 2199405 bytes
+2026/05/12-22:28:25.123 628c Generated table #2987@1: 11402 keys, 683212 bytes
+2026/05/12-22:28:25.124 628c Compacted 1@1 + 8@2 files => 16268001 bytes
+2026/05/12-22:28:25.125 628c compacted to: files[ 0 1 38 0 0 0 0 ]
+2026/05/12-22:28:25.127 628c Delete type=2 #2884
+2026/05/12-22:28:25.127 628c Delete type=2 #2929
+2026/05/12-22:28:25.127 628c Delete type=2 #2930
+2026/05/12-22:28:25.127 628c Delete type=2 #2937
+2026/05/12-22:28:25.128 628c Delete type=2 #2938
+2026/05/12-22:28:25.129 628c Delete type=2 #2939
+2026/05/12-22:28:25.129 628c Delete type=2 #2940
+2026/05/12-22:28:25.129 628c Delete type=2 #2954
+2026/05/12-22:28:25.129 628c Delete type=2 #2955
+2026/05/12-22:28:25.129 628c Delete type=2 #2956
+2026/05/12-22:28:25.130 628c Delete type=2 #2957
+2026/05/12-22:28:25.130 628c Delete type=2 #2958
+2026/05/12-22:28:25.130 628c Delete type=2 #2974
+2026/05/12-22:28:25.130 628c Delete type=2 #2975
+2026/05/12-22:28:33.300 7730 Compacting 1@1 + 10@2 files
+2026/05/12-22:28:33.385 7730 Generated table #2988@1: 9982 keys, 2132676 bytes
+2026/05/12-22:28:33.449 7730 Generated table #2989@1: 10975 keys, 2134147 bytes
+2026/05/12-22:28:33.511 7730 Generated table #2990@1: 11249 keys, 2135340 bytes
+2026/05/12-22:28:33.691 7730 Generated table #2991@1: 105337 keys, 2255466 bytes
+2026/05/12-22:28:33.865 7730 Generated table #2992@1: 99498 keys, 2249526 bytes
+2026/05/12-22:28:34.001 7730 Generated table #2993@1: 97755 keys, 2247536 bytes
+2026/05/12-22:28:34.144 7730 Generated table #2994@1: 97500 keys, 2246423 bytes
+2026/05/12-22:28:34.289 7730 Generated table #2995@1: 97689 keys, 2246530 bytes
+2026/05/12-22:28:34.427 7730 Generated table #2996@1: 98218 keys, 2247341 bytes
+2026/05/12-22:28:34.548 7730 Generated table #2997@1: 94864 keys, 2184713 bytes
+2026/05/12-22:28:34.548 7730 Compacted 1@1 + 10@2 files => 22079698 bytes
+2026/05/12-22:28:34.550 7730 compacted to: files[ 0 0 38 0 0 0 0 ]

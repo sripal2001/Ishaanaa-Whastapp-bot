@@ -1,0 +1,510 @@
+// ============================================================
+//  ISHAANAA DESIGNER STUDIO
+//  WhatsApp Business Server v2.0 (Baileys — No Browser)
+//  Handles: Employee Attendance + POS Invoice Delivery
+// ============================================================
+
+'use strict';
+
+// ─── Global Error Handlers ───────────────────────────────────
+process.on('uncaughtException',  (err) => console.error('❌ UNCAUGHT:', err.message, err.stack));
+process.on('unhandledRejection', (r)   => console.error('❌ REJECTION:', r));
+
+// ─── Imports ─────────────────────────────────────────────────
+const {
+  default: makeWASocket,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  makeInMemoryStore,
+  jidNormalizedUser,
+  downloadContentFromMessage,
+} = require('@whiskeysockets/baileys');
+const pino        = require('pino');
+const QRCode      = require('qrcode');
+const express     = require('express');
+const schedule    = require('node-schedule');
+const dayjs       = require('dayjs');
+const mongoose    = require('mongoose');
+const { Boom }    = require('@hapi/boom');
+
+const db          = require('./database');
+const reports     = require('./reports');
+const config      = require('./config');
+const { useMongoDBAuthState } = require('./baileys-auth-mongo');
+
+// ─── Environment ─────────────────────────────────────────────
+const PORT         = process.env.PORT || 10000;
+const MONGODB_URI  = process.env.MONGODB_URI;
+const BOT_API_KEY  = process.env.BOT_API_KEY || 'ish-bot-secret-2024';
+const MANAGER_JID  = config.MANAGER_PHONE.replace(/\D/g, '') + '@s.whatsapp.net';
+
+// ─── State ───────────────────────────────────────────────────
+let sock         = null;
+let latestQR     = null;
+let isConnected  = false;
+
+// ============================================================
+//  HEARTBEAT + API SERVER (Express)
+// ============================================================
+const app = express();
+app.use(express.json({ limit: '20mb' })); // Needed for PDF base64
+
+// ── Health check ────────────────────────────────────────────
+app.get('/', (req, res) => {
+  res.json({
+    status: isConnected ? '✅ WhatsApp Connected' : '⏳ Waiting for QR scan',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ── QR Code page ─────────────────────────────────────────────
+app.get('/qr', async (req, res) => {
+  if (isConnected) {
+    return res.send('<h2 style="font-family:sans-serif;color:green">✅ WhatsApp is Connected! No QR needed.</h2>');
+  }
+  if (!latestQR) {
+    return res.send('<h2 style="font-family:sans-serif;color:orange">⏳ QR not ready yet. Refresh in 10 seconds...</h2>');
+  }
+  try {
+    const qrImage = await QRCode.toDataURL(latestQR, { errorCorrectionLevel: 'H', width: 400 });
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Ishaanaa Bot — Scan QR</title>
+          <meta http-equiv="refresh" content="30">
+          <style>
+            body { font-family: sans-serif; display: flex; flex-direction: column;
+                   align-items: center; justify-content: center; min-height: 100vh;
+                   background: #111; color: #eee; margin: 0; }
+            h1 { color: #25D366; }
+            p  { color: #aaa; margin-bottom: 24px; }
+            img { border: 4px solid #25D366; border-radius: 12px; }
+          </style>
+        </head>
+        <body>
+          <h1>🌸 Ishaanaa Bot</h1>
+          <p>Open WhatsApp Business → Settings → Linked Devices → Link a Device</p>
+          <img src="${qrImage}" width="350" />
+          <p style="margin-top:16px;font-size:12px">Page auto-refreshes every 30s</p>
+        </body>
+      </html>
+    `);
+  } catch (e) {
+    res.status(500).send('QR generation failed: ' + e.message);
+  }
+});
+
+// ── POS Invoice API ──────────────────────────────────────────
+// Called by the Flutter POS app after every sale
+app.post('/api/send-invoice', async (req, res) => {
+  // Auth check
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey || apiKey !== BOT_API_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  if (!isConnected || !sock) {
+    return res.status(503).json({ error: 'WhatsApp not connected. Scan QR first.' });
+  }
+
+  const { phone, message, pdfBase64, filename } = req.body;
+  if (!phone || !message || !pdfBase64) {
+    return res.status(400).json({ error: 'Missing required fields: phone, message, pdfBase64' });
+  }
+
+  try {
+    // Format phone number to WhatsApp JID
+    const cleanPhone = phone.replace(/\D/g, '');
+    const jid = (cleanPhone.length === 10 ? '91' + cleanPhone : cleanPhone) + '@s.whatsapp.net';
+
+    const pdfBuffer = Buffer.from(pdfBase64, 'base64');
+    const invoiceFilename = filename || `Invoice_${Date.now()}.pdf`;
+
+    // Send PDF document first
+    await sock.sendMessage(jid, {
+      document: pdfBuffer,
+      mimetype: 'application/pdf',
+      fileName: invoiceFilename,
+    });
+
+    // Send the text message
+    await sock.sendMessage(jid, { text: message });
+
+    console.log(`✅ Invoice sent to ${phone} (${invoiceFilename})`);
+    res.json({ success: true, message: `Invoice sent to ${phone}` });
+
+  } catch (err) {
+    console.error('❌ Invoice send error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`🌐 HTTP server listening on port ${PORT}`);
+  console.log(`   QR: http://localhost:${PORT}/qr`);
+});
+
+// ============================================================
+//  BAILEYS WHATSAPP CLIENT
+// ============================================================
+async function connectWhatsApp() {
+  const { version } = await fetchLatestBaileysVersion();
+  console.log(`📱 Using WhatsApp Web v${version.join('.')}`);
+
+  const { state, saveCreds } = await useMongoDBAuthState();
+
+  sock = makeWASocket({
+    version,
+    auth: state,
+    logger: pino({ level: 'silent' }), // Suppress verbose logs
+    printQRInTerminal: true,
+    browser: ['Ishaanaa Bot', 'Chrome', '120.0.0'],
+    syncFullHistory: false,        // ← Key: don't sync old messages (saves RAM)
+    markOnlineOnConnect: false,
+    generateHighQualityLinkPreview: false,
+  });
+
+  // ── Save credentials whenever they update ─────────────────
+  sock.ev.on('creds.update', saveCreds);
+
+  // ── Connection status ──────────────────────────────────────
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      latestQR = qr;
+      isConnected = false;
+      console.log('\n📸 NEW QR CODE GENERATED');
+      console.log('─────────────────────────────────────────');
+      console.log('👆 SCAN HERE → http://your-render-url.onrender.com/qr');
+      console.log('─────────────────────────────────────────\n');
+    }
+
+    if (connection === 'open') {
+      isConnected = true;
+      latestQR = null;
+      console.log('\n✅ WhatsApp Business Connected!');
+      console.log('┌─────────────────────────────────────────────┐');
+      console.log('│  🌸 ISHAANAA DESIGNER STUDIO                │');
+      console.log('│     WhatsApp Business Server v2.0 — LIVE    │');
+      console.log('└─────────────────────────────────────────────┘\n');
+
+      // Notify manager the bot is online
+      try {
+        await sock.sendMessage(MANAGER_JID, {
+          text: '🟢 *Ishaanaa Bot is LIVE*\n\nWhatsApp Business Server connected and ready.\n• Attendance tracking: ✅\n• Invoice delivery: ✅'
+        });
+      } catch (_) {}
+    }
+
+    if (connection === 'close') {
+      isConnected = false;
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const reason     = DisconnectReason[statusCode] || statusCode;
+      console.log(`⚠️ Disconnected. Reason: ${reason}`);
+
+      // Always reconnect unless logged out
+      if (statusCode !== DisconnectReason.loggedOut) {
+        console.log('🔄 Reconnecting in 5s...');
+        setTimeout(connectWhatsApp, 5000);
+      } else {
+        console.log('🚪 Logged out. Clearing session from MongoDB...');
+        await mongoose.connection.collection('baileys_auth_keys').deleteMany({});
+        console.log('Session cleared. Please restart the server to get a new QR code.');
+      }
+    }
+  });
+
+  // ── Message handler ───────────────────────────────────────
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+    for (const msg of messages) {
+      if (msg.key.fromMe) continue;          // Ignore own messages
+      if (!msg.message)   continue;          // Ignore empty
+      await handleIncomingMessage(msg);
+    }
+  });
+}
+
+// ============================================================
+//  MESSAGE HANDLER — Attendance Logic
+// ============================================================
+async function handleIncomingMessage(msg) {
+  try {
+    const jid      = msg.key.remoteJid;
+    const senderJid = msg.key.participant || jid; // For groups, use participant
+    const phone    = senderJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
+    const isFromManager = jidNormalizedUser(senderJid) === jidNormalizedUser(MANAGER_JID);
+
+    // Extract message text
+    const msgContent = msg.message;
+    const text = (
+      msgContent?.conversation ||
+      msgContent?.extendedTextMessage?.text ||
+      ''
+    ).trim();
+
+    // Extract location if present
+    const locationMsg = msgContent?.locationMessage;
+
+    // ── Location message = Check-in / Check-out ───────────────
+    if (locationMsg) {
+      await handleLocation(phone, locationMsg, jid);
+      return;
+    }
+
+    // ── Text commands ─────────────────────────────────────────
+    if (!text) return;
+
+    const lower = text.toLowerCase();
+
+    // Manager commands
+    if (isFromManager) {
+      await handleManagerCommand(lower, text, jid);
+      return;
+    }
+
+    // Employee commands
+    const emp = await db.getEmployeeByPhone(phone);
+    if (!emp) return; // Ignore unknown numbers
+
+    if (lower === 'hi' || lower === 'hello' || lower === 'start') {
+      await sendText(jid,
+        `👋 Hello ${emp.name}!\n\nPlease *share your live location* to check in or check out.\n\nTap the 📎 icon → Location → Share Live Location.`
+      );
+      return;
+    }
+
+    if (lower === 'status' || lower === 'my status') {
+      const record = await db.getTodayRecord(emp._id);
+      if (!record) {
+        await sendText(jid, `📋 *${emp.name}* — No attendance recorded today yet.`);
+      } else {
+        await sendText(jid,
+          `📋 *${emp.name}* — Today's Status\n\n` +
+          `Status: *${record.status}*\n` +
+          `Check-in:  ${record.check_in  || '—'}\n` +
+          `Check-out: ${record.check_out || '—'}\n` +
+          `Hours: ${record.hours_worked ? record.hours_worked.toFixed(1) + 'h' : '—'}`
+        );
+      }
+      return;
+    }
+
+    if (lower.startsWith('leave')) {
+      const datePart = text.split(' ').slice(1).join(' ').trim();
+      const leaveDate = datePart || dayjs().format('YYYY-MM-DD');
+      await db.requestLeave(emp._id, leaveDate, msg.key.id);
+      await sendText(jid, `✅ Leave request for *${leaveDate}* has been sent to the manager.`);
+      await sendText(MANAGER_JID,
+        `🙋 *Leave Request*\n\n*${emp.name}* has requested leave on *${leaveDate}*.\n\nReply *approve ${emp.name}* or *reject ${emp.name}*`
+      );
+      return;
+    }
+
+  } catch (err) {
+    console.error('❌ Message handler error:', err.message);
+  }
+}
+
+// ─── Location Handler ─────────────────────────────────────────
+async function handleLocation(phone, locationMsg, jid) {
+  const emp = await db.getEmployeeByPhone(phone);
+  if (!emp) return;
+
+  const { latitude, longitude } = locationMsg;
+  const now   = dayjs();
+  const timeStr = now.format('hh:mm A');
+
+  // Check distance from studio
+  const distanceKm = getDistance(
+    latitude, longitude,
+    config.STUDIO_LAT, config.STUDIO_LNG
+  );
+
+  const isNearStudio = distanceKm <= config.GEOFENCE_RADIUS_KM;
+
+  if (!isNearStudio) {
+    await sendText(jid,
+      `📍 Location received, but you appear to be *${distanceKm.toFixed(2)} km* from the studio.\n\n` +
+      `Please share your location from *within the studio* to mark attendance.`
+    );
+    return;
+  }
+
+  // Check if already checked in today
+  const record = await db.getTodayRecord(emp._id);
+
+  if (!record) {
+    // ── Check IN ─────────────────────────────────────────────
+    const status = isLate(now) ? 'Late' : 'Present';
+    await db.checkIn(emp._id, timeStr, status);
+    await sendText(jid,
+      `✅ *Check-in Recorded!*\n\n` +
+      `👤 ${emp.name}\n` +
+      `🕐 ${timeStr}\n` +
+      `📌 ${distanceKm.toFixed(0)}m from studio\n` +
+      `Status: *${status}*\n\n` +
+      `Share location again to check out.`
+    );
+  } else if (!record.check_out) {
+    // ── Check OUT ────────────────────────────────────────────
+    const checkInTime = dayjs(`${dayjs().format('YYYY-MM-DD')} ${record.check_in}`, 'YYYY-MM-DD hh:mm A');
+    const hoursWorked = now.diff(checkInTime, 'minute') / 60;
+    const finalStatus = hoursWorked >= config.MIN_HOURS ? 'Full Day' : 'Half Day';
+
+    await db.checkOut(emp._id, timeStr, hoursWorked, finalStatus);
+    await sendText(jid,
+      `👋 *Check-out Recorded!*\n\n` +
+      `👤 ${emp.name}\n` +
+      `🕐 ${timeStr}\n` +
+      `⏱ Hours worked: *${hoursWorked.toFixed(1)}h*\n` +
+      `Status: *${finalStatus}*\n\n` +
+      `See you tomorrow! 🌸`
+    );
+  } else {
+    await sendText(jid, `✅ You're already checked out for today. See you tomorrow!`);
+  }
+}
+
+// ─── Manager Commands ─────────────────────────────────────────
+async function handleManagerCommand(lower, text, jid) {
+  if (lower === 'report' || lower === 'today') {
+    const report = await reports.todayTextReport();
+    await sendText(jid, report);
+    return;
+  }
+
+  if (lower.startsWith('approve ')) {
+    const name = text.slice(8).trim();
+    const emp = await db.getEmployeeByName(name);
+    if (!emp) {
+      await sendText(jid, `❌ Employee "${name}" not found.`);
+      return;
+    }
+    const today = dayjs().format('YYYY-MM-DD');
+    await db.requestLeave(emp._id, today, 'manager-approved-' + Date.now());
+    const empJid = '91' + emp.phone.replace(/\D/g, '').slice(-10) + '@s.whatsapp.net';
+    await sendText(empJid, `✅ Your leave for *${today}* has been *approved* by the manager.`);
+    await sendText(jid, `✅ Leave approved for *${emp.name}*.`);
+    return;
+  }
+
+  if (lower.startsWith('reject ')) {
+    const name = text.slice(7).trim();
+    const emp = await db.getEmployeeByName(name);
+    if (!emp) {
+      await sendText(jid, `❌ Employee "${name}" not found.`);
+      return;
+    }
+    const empJid = '91' + emp.phone.replace(/\D/g, '').slice(-10) + '@s.whatsapp.net';
+    await sendText(empJid, `❌ Your leave request has been *rejected* by the manager.`);
+    await sendText(jid, `✅ Leave rejected for *${emp.name}*.`);
+    return;
+  }
+
+  if (lower === 'help') {
+    await sendText(jid,
+      `🤖 *Manager Commands*\n\n` +
+      `*report* — Today's attendance summary\n` +
+      `*approve [name]* — Approve leave\n` +
+      `*reject [name]* — Reject leave\n` +
+      `*help* — Show this menu`
+    );
+    return;
+  }
+}
+
+// ============================================================
+//  SCHEDULED REPORTS
+// ============================================================
+function setupSchedules() {
+  // Daily check-in reminder at 9:00 AM
+  schedule.scheduleJob('0 9 * * 1-6', async () => {
+    const employees = await db.getAllEmployees();
+    for (const emp of employees) {
+      const jid = '91' + emp.phone.replace(/\D/g, '').slice(-10) + '@s.whatsapp.net';
+      try {
+        await sendText(jid, `🌅 Good morning ${emp.name}! Please share your location to mark attendance.`);
+        await new Promise(r => setTimeout(r, 1000)); // 1s delay between messages
+      } catch (_) {}
+    }
+  });
+
+  // Evening report to manager at 7:30 PM
+  schedule.scheduleJob('30 19 * * 1-6', async () => {
+    try {
+      const report = await reports.todayTextReport();
+      await sendText(MANAGER_JID, `📊 *Evening Attendance Report*\n\n${report}`);
+    } catch (e) {
+      console.error('Report error:', e.message);
+    }
+  });
+
+  console.log('📅 Schedules set: 9:00 AM reminders, 7:30 PM report');
+}
+
+// ============================================================
+//  UTILITY FUNCTIONS
+// ============================================================
+async function sendText(jid, text) {
+  if (!sock || !isConnected) return;
+  try {
+    await sock.sendMessage(jid, { text });
+  } catch (err) {
+    console.error(`❌ Failed to send to ${jid}:`, err.message);
+  }
+}
+
+function getDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Earth radius in km
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function toRad(deg) { return deg * Math.PI / 180; }
+
+function isLate(time) {
+  const cutoff = dayjs().hour(config.LATE_HOUR).minute(config.LATE_MINUTE).second(0);
+  return time.isAfter(cutoff);
+}
+
+// ============================================================
+//  STARTUP
+// ============================================================
+async function start() {
+  console.log('┌─────────────────────────────────────────────┐');
+  console.log('│  🌸 ISHAANAA DESIGNER STUDIO                │');
+  console.log('│     WhatsApp Business Server v2.0           │');
+  console.log('└─────────────────────────────────────────────┘\n');
+
+  if (!MONGODB_URI) {
+    console.error('❌ MONGODB_URI is not set! Exiting.');
+    process.exit(1);
+  }
+
+  // Connect to MongoDB
+  await mongoose.connect(MONGODB_URI);
+  console.log('✅ Connected to MongoDB Atlas');
+
+  // Sync employees
+  await db.upsertEmployees(config.EMPLOYEES);
+
+  // Setup daily schedules
+  setupSchedules();
+
+  // Start WhatsApp
+  console.log('📱 Connecting to WhatsApp Business...');
+  await connectWhatsApp();
+}
+
+start().catch((err) => {
+  console.error('❌ Fatal startup error:', err.message);
+  process.exit(1);
+});
