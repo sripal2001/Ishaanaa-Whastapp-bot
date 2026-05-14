@@ -175,9 +175,15 @@ async function connectWhatsApp() {
     if (qr) {
       latestQR = qr;
       isConnected = false;
+      const renderUrl = process.env.RENDER_EXTERNAL_URL || 'YOUR_RENDER_URL';
       console.log('\n📸 NEW QR CODE GENERATED');
       console.log('─────────────────────────────────────────');
-      console.log('👆 SCAN HERE → http://your-render-url.onrender.com/qr');
+      if (renderUrl !== 'YOUR_RENDER_URL') {
+        console.log(`👆 SCAN HERE → ${renderUrl}/qr`);
+      } else {
+        console.log('👆 OPEN YOUR BROWSER AND GO TO:');
+        console.log('   https://ishaanaa-whastapp-bot-attendance.onrender.com/qr');
+      }
       console.log('─────────────────────────────────────────\n');
     }
 
