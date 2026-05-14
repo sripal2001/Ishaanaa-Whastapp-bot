@@ -140,7 +140,7 @@ app.post('/api/send-invoice', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 HTTP server listening on port ${PORT}`);
   console.log(`   QR: http://localhost:${PORT}/qr`);
 });
