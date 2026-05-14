@@ -72,7 +72,7 @@ app.get('/qr', async (req, res) => {
       <html>
         <head>
           <title>Ishaanaa Bot — Scan QR</title>
-          <meta http-equiv="refresh" content="30">
+          <meta http-equiv="refresh" content="15">
           <style>
             body { font-family: sans-serif; display: flex; flex-direction: column;
                    align-items: center; justify-content: center; min-height: 100vh;
