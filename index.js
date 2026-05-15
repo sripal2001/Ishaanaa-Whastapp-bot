@@ -264,12 +264,18 @@ async function connectWhatsApp() {
 async function handleIncomingMessage(msg) {
   try {
     const jid      = msg.key.remoteJid;
-    const senderJid = msg.key.participant || jid; // For groups, use participant
+    const senderJid = jidNormalizedUser(msg.key.participant || jid); // Normalize to remove device ID
     const phone    = senderJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
-    const isFromManager = jidNormalizedUser(senderJid) === jidNormalizedUser(MANAGER_JID);
+    const isFromManager = senderJid === jidNormalizedUser(MANAGER_JID);
+
+    // Extract actual message content (handle ephemeral/viewOnce)
+    let msgContent = msg.message;
+    if (msgContent?.ephemeralMessage) msgContent = msgContent.ephemeralMessage.message;
+    if (msgContent?.viewOnceMessage) msgContent = msgContent.viewOnceMessage.message;
+    if (msgContent?.viewOnceMessageV2) msgContent = msgContent.viewOnceMessageV2.message;
+    if (msgContent?.documentWithCaptionMessage) msgContent = msgContent.documentWithCaptionMessage.message;
 
     // Extract message text
-    const msgContent = msg.message;
     const text = (
       msgContent?.conversation ||
       msgContent?.extendedTextMessage?.text ||
