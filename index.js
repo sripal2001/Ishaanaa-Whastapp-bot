@@ -339,6 +339,16 @@ async function handleIncomingMessage(msg) {
       return;
     }
 
+    if (lower === 'check in' || lower === 'checkin' || lower === 'login') {
+      await sendText(jid, `To check in, please *share your location* 📍\n\n(Tap the 📎 icon → Location → Send your current location).`);
+      return;
+    }
+
+    if (lower === 'check out' || lower === 'checkout' || lower === 'logout') {
+      await sendText(jid, `To check out, please *share your location* 📍\n\n(Tap the 📎 icon → Location → Send your current location).`);
+      return;
+    }
+
     if (lower === 'status' || lower === 'my status') {
       const record = await db.getTodayRecord(emp._id);
       if (!record) {
