@@ -267,13 +267,30 @@ async function handleIncomingMessage(msg) {
     const senderJid = jidNormalizedUser(msg.key.participant || jid); // Normalize to remove device ID
     const phone    = senderJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
     const isFromManager = senderJid === jidNormalizedUser(MANAGER_JID);
+    const isGroup  = jid.endsWith('@g.us');
 
-    // Extract actual message content (handle ephemeral/viewOnce)
+    // Debug: log every incoming message
+    const msgKeys = msg.message ? Object.keys(msg.message) : [];
+    console.log(`📩 MSG from ${phone} ${isGroup ? '(GROUP)' : '(DM)'} | keys: [${msgKeys.join(', ')}]`);
+
+    // Extract actual message content (handle ephemeral/viewOnce wrappers)
     let msgContent = msg.message;
-    if (msgContent?.ephemeralMessage) msgContent = msgContent.ephemeralMessage.message;
-    if (msgContent?.viewOnceMessage) msgContent = msgContent.viewOnceMessage.message;
-    if (msgContent?.viewOnceMessageV2) msgContent = msgContent.viewOnceMessageV2.message;
-    if (msgContent?.documentWithCaptionMessage) msgContent = msgContent.documentWithCaptionMessage.message;
+    if (msgContent?.ephemeralMessage) {
+      msgContent = msgContent.ephemeralMessage.message;
+      console.log('  ↳ Unwrapped ephemeralMessage, keys:', Object.keys(msgContent));
+    }
+    if (msgContent?.viewOnceMessage) {
+      msgContent = msgContent.viewOnceMessage.message;
+      console.log('  ↳ Unwrapped viewOnceMessage');
+    }
+    if (msgContent?.viewOnceMessageV2) {
+      msgContent = msgContent.viewOnceMessageV2.message;
+      console.log('  ↳ Unwrapped viewOnceMessageV2');
+    }
+    if (msgContent?.documentWithCaptionMessage) {
+      msgContent = msgContent.documentWithCaptionMessage.message;
+      console.log('  ↳ Unwrapped documentWithCaptionMessage');
+    }
 
     // Extract message text
     const text = (
@@ -282,12 +299,21 @@ async function handleIncomingMessage(msg) {
       ''
     ).trim();
 
-    // Extract location if present
-    const locationMsg = msgContent?.locationMessage;
+    // Extract location if present (handle BOTH static and live location)
+    const locationMsg = msgContent?.locationMessage || msgContent?.liveLocationMessage;
+
+    if (locationMsg) {
+      console.log(`  📍 Location detected! lat=${locationMsg.degreesLatitude || locationMsg.latitude}, lng=${locationMsg.degreesLongitude || locationMsg.longitude}`);
+    }
 
     // ── Location message = Check-in / Check-out ───────────────
     if (locationMsg) {
-      await handleLocation(phone, locationMsg, jid);
+      // Normalize lat/lng field names (liveLocationMessage uses different keys)
+      const normalizedLocation = {
+        latitude: locationMsg.degreesLatitude || locationMsg.latitude,
+        longitude: locationMsg.degreesLongitude || locationMsg.longitude,
+      };
+      await handleLocation(phone, normalizedLocation, jid);
       return;
     }
 
@@ -586,21 +612,7 @@ async function start() {
   // Sync employees
   await db.upsertEmployees(config.EMPLOYEES);
 
-  // One-time fix: Mark everyone as present for today (2026-05-14)
-  // so they can check out this evening.
-  try {
-    const employees = await db.getAllEmployees();
-    const today = dayjs().format('YYYY-MM-DD');
-    for (const emp of employees) {
-      const existing = await db.getTodayRecord(emp._id);
-      if (!existing) {
-        await db.checkIn(emp._id, '10:00 AM', 'Present');
-        console.log(`📍 Startup: Marked ${emp.name} as Present for today.`);
-      }
-    }
-  } catch (err) {
-    console.error('Startup mark error:', err.message);
-  }
+  // NOTE: Auto-mark on startup removed — employees must check in via location.
 
   // Setup daily schedules
   setupSchedules();
