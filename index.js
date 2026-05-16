@@ -6,6 +6,9 @@
 
 'use strict';
 
+// Ensure all dates are processed in IST (Indian Standard Time)
+process.env.TZ = 'Asia/Kolkata';
+
 // ─── Global Error Handlers ───────────────────────────────────
 process.on('uncaughtException',  (err) => console.error('❌ UNCAUGHT:', err.message, err.stack));
 process.on('unhandledRejection', (r)   => console.error('❌ REJECTION:', r));
@@ -24,6 +27,15 @@ const QRCode      = require('qrcode');
 const express     = require('express');
 const schedule    = require('node-schedule');
 const dayjs       = require('dayjs');
+const customParseFormat = require('dayjs/plugin/customParseFormat');
+const utc         = require('dayjs/plugin/utc');
+const timezone    = require('dayjs/plugin/timezone');
+
+dayjs.extend(customParseFormat);
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.tz.setDefault('Asia/Kolkata');
+
 const mongoose    = require('mongoose');
 const { Boom }    = require('@hapi/boom');
 
@@ -332,19 +344,19 @@ async function handleIncomingMessage(msg) {
     const emp = await db.getEmployeeByPhone(phone);
     if (!emp) return; // Ignore unknown numbers
 
-    if (lower === 'hi' || lower === 'hello' || lower === 'start') {
+    if (lower.includes('hi') || lower.includes('hello') || lower.includes('start')) {
       await sendText(jid,
         `👋 Hello ${emp.name}!\n\nPlease *share your live location* to check in or check out.\n\nTap the 📎 icon → Location → Share Live Location.`
       );
       return;
     }
 
-    if (lower === 'check in' || lower === 'checkin' || lower === 'login') {
+    if (lower.includes('check in') || lower.includes('checkin') || lower.includes('login')) {
       await sendText(jid, `To check in, please *share your location* 📍\n\n(Tap the 📎 icon → Location → Send your current location).`);
       return;
     }
 
-    if (lower === 'check out' || lower === 'checkout' || lower === 'logout') {
+    if (lower.includes('check out') || lower.includes('checkout') || lower.includes('logout') || lower.includes('log out')) {
       await sendText(jid, `To check out, please *share your location* 📍\n\n(Tap the 📎 icon → Location → Send your current location).`);
       return;
     }

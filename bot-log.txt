@@ -1,17 +1,6 @@
 ┌─────────────────────────────────────────────┐
 │  🌸 ISHAANAA DESIGNER STUDIO                │
-│     WhatsApp Attendance Bot (Cloud)         │
+│     WhatsApp Business Server v2.0           │
 └─────────────────────────────────────────────┘
 
-⚠️ No MONGODB_URI found in environment variables.
-Proceeding with LocalAuth...
-📡 Heartbeat server listening on port 10000
-❌ UNHANDLED REJECTION at: Promise {
-  <rejected> MongooseError: Operation `employees.findOneAndUpdate()` buffering timed out after 10000ms
-      at Timeout.<anonymous> (C:\Users\sripal\.gemini\antigravity\scratch\ishaanaa-attendance\node_modules\mongoose\lib\drivers\node-mongodb-native\collection.js:187:23)
-      at listOnTimeout (node:internal/timers:569:17)
-      at process.processTimers (node:internal/timers:512:7)
-} reason: MongooseError: Operation `employees.findOneAndUpdate()` buffering timed out after 10000ms
-    at Timeout.<anonymous> (C:\Users\sripal\.gemini\antigravity\scratch\ishaanaa-attendance\node_modules\mongoose\lib\drivers\node-mongodb-native\collection.js:187:23)
-    at listOnTimeout (node:internal/timers:569:17)
-    at process.processTimers (node:internal/timers:512:7)
+❌ MONGODB_URI is not set! Exiting.

@@ -4,6 +4,13 @@
 
 const mongoose = require('mongoose');
 const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc');
+const timezone = require('dayjs/plugin/timezone');
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.tz.setDefault('Asia/Kolkata');
+
 const { Employee, Attendance, Leave, PendingConfirmation } = require('./models');
 
 // Connect function to be called from index.js
