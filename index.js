@@ -324,17 +324,25 @@ async function handleIncomingMessage(msg) {
       return; 
     }
 
-    // 2. ONLY allow the exact target group from config.js
+    // 2. ONLY allow the target group from config.js
     if (isGroup) {
       if (!targetGroupId) {
         try {
           const meta = await sock.groupMetadata(jid);
-          if (meta.subject === config.GROUP_NAME) {
+          const actualName = (meta.subject || '').trim();
+          const configName = (config.GROUP_NAME || '').trim();
+          console.log(`🔍 Group message from: "${actualName}" | Expected: "${configName}"`);
+          if (actualName.toLowerCase() === configName.toLowerCase()) {
             targetGroupId = jid; // Cache the correct group ID
+            console.log(`✅ Locked to group: ${actualName} (${jid})`);
           } else {
-            return; // Ignore this random group completely
+            console.log(`⛔ Ignoring non-target group: "${actualName}"`);
+            return; // Ignore this group
           }
-        } catch (e) { return; } // If fetch fails, ignore
+        } catch (e) {
+          console.log(`⚠️ Could not fetch group metadata for ${jid}: ${e.message}`);
+          return; // If fetch fails, ignore
+        }
       } else if (jid !== targetGroupId) {
         return; // Ignore all other groups instantly
       }
