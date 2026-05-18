@@ -297,6 +297,8 @@ async function connectWhatsApp() {
 // ============================================================
 //  MESSAGE HANDLER — Attendance Logic
 // ============================================================
+let targetGroupId = null; // Cache the target group ID
+
 async function handleIncomingMessage(msg) {
   try {
     const jid      = msg.key.remoteJid;
@@ -304,10 +306,6 @@ async function handleIncomingMessage(msg) {
     const phone    = senderJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
     const isFromManager = senderJid === jidNormalizedUser(MANAGER_JID);
     const isGroup  = jid.endsWith('@g.us');
-
-    // Debug: log every incoming message
-    const msgKeys = msg.message ? Object.keys(msg.message) : [];
-    console.log(`📩 MSG from ${phone} ${isGroup ? '(GROUP)' : '(DM)'} | keys: [${msgKeys.join(', ')}]`);
 
     // Extract actual message content
     let msgContent = msg.message;
@@ -320,13 +318,31 @@ async function handleIncomingMessage(msg) {
     const lower = text.toLowerCase();
     const locationMsg = msgContent?.locationMessage || msgContent?.liveLocationMessage;
 
-    // 1. Restrict to Group Only (Manager can still DM for reports)
+    // 1. SILENTLY ignore all DMs (except from the Manager). 
+    // Do not auto-reply so we don't spam customers.
     if (!isGroup && !isFromManager) {
-      if (text) {
-        await sendText(jid, `❌ I only process attendance inside the Store Group. Please message me there!`);
-      }
-      return;
+      return; 
     }
+
+    // 2. ONLY allow the exact target group from config.js
+    if (isGroup) {
+      if (!targetGroupId) {
+        try {
+          const meta = await sock.groupMetadata(jid);
+          if (meta.subject === config.GROUP_NAME) {
+            targetGroupId = jid; // Cache the correct group ID
+          } else {
+            return; // Ignore this random group completely
+          }
+        } catch (e) { return; } // If fetch fails, ignore
+      } else if (jid !== targetGroupId) {
+        return; // Ignore all other groups instantly
+      }
+    }
+
+    // Debug: log only messages from the valid group or manager
+    const msgKeys = msg.message ? Object.keys(msg.message) : [];
+    console.log(`📩 Valid MSG from ${phone} | keys: [${msgKeys.join(', ')}]`);
 
     // 2. Resolve Employee (Handle @lid hidden numbers)
     let emp = await db.getEmployeeByPhone(phone);
