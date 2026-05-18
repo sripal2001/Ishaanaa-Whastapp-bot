@@ -285,37 +285,46 @@ async function handleIncomingMessage(msg) {
     const msgKeys = msg.message ? Object.keys(msg.message) : [];
     console.log(`📩 MSG from ${phone} ${isGroup ? '(GROUP)' : '(DM)'} | keys: [${msgKeys.join(', ')}]`);
 
-    // Extract actual message content (handle ephemeral/viewOnce wrappers)
+    // Extract actual message content
     let msgContent = msg.message;
-    if (msgContent?.ephemeralMessage) {
-      msgContent = msgContent.ephemeralMessage.message;
-      console.log('  ↳ Unwrapped ephemeralMessage, keys:', Object.keys(msgContent));
-    }
-    if (msgContent?.viewOnceMessage) {
-      msgContent = msgContent.viewOnceMessage.message;
-      console.log('  ↳ Unwrapped viewOnceMessage');
-    }
-    if (msgContent?.viewOnceMessageV2) {
-      msgContent = msgContent.viewOnceMessageV2.message;
-      console.log('  ↳ Unwrapped viewOnceMessageV2');
-    }
-    if (msgContent?.documentWithCaptionMessage) {
-      msgContent = msgContent.documentWithCaptionMessage.message;
-      console.log('  ↳ Unwrapped documentWithCaptionMessage');
-    }
+    if (msgContent?.ephemeralMessage) msgContent = msgContent.ephemeralMessage.message;
+    if (msgContent?.viewOnceMessage) msgContent = msgContent.viewOnceMessage.message;
+    if (msgContent?.viewOnceMessageV2) msgContent = msgContent.viewOnceMessageV2.message;
+    if (msgContent?.documentWithCaptionMessage) msgContent = msgContent.documentWithCaptionMessage.message;
 
-    // Extract message text
-    const text = (
-      msgContent?.conversation ||
-      msgContent?.extendedTextMessage?.text ||
-      ''
-    ).trim();
-
-    // Extract location if present (handle BOTH static and live location)
+    const text = (msgContent?.conversation || msgContent?.extendedTextMessage?.text || '').trim();
+    const lower = text.toLowerCase();
     const locationMsg = msgContent?.locationMessage || msgContent?.liveLocationMessage;
 
-    if (locationMsg) {
-      console.log(`  📍 Location detected! lat=${locationMsg.degreesLatitude || locationMsg.latitude}, lng=${locationMsg.degreesLongitude || locationMsg.longitude}`);
+    // 1. Restrict to Group Only (Manager can still DM for reports)
+    if (!isGroup && !isFromManager) {
+      if (text) {
+        await sendText(jid, `❌ I only process attendance inside the Store Group. Please message me there!`);
+      }
+      return;
+    }
+
+    // 2. Resolve Employee (Handle @lid hidden numbers)
+    let emp = await db.getEmployeeByPhone(phone);
+    
+    // If not found, and they sent a registration command:
+    if (!emp && lower.startsWith('register ')) {
+      const name = text.substring(9).trim();
+      const existingEmp = await db.Employee.findOne({ name: new RegExp('^' + name + '$', 'i') });
+      if (existingEmp) {
+        existingEmp.phone = phone; // Update their phone to this @lid
+        await existingEmp.save();
+        await sendText(jid, `✅ Successfully linked your WhatsApp to *${existingEmp.name}*! You can now check-in/out.`);
+      } else {
+        await sendText(jid, `❌ Could not find employee "${name}". Ask the manager to add you to config.js.`);
+      }
+      return;
+    }
+
+    // If still not found, tell them to register
+    if (!emp && (locationMsg || lower.includes('checkin') || lower.includes('checkout') || lower.includes('logout'))) {
+      await sendText(jid, `❌ Unregistered ID. Because your phone number is hidden in this group, please reply with:\n*register YourName*\n(e.g., register Neha)`);
+      return;
     }
 
     // ── Location message = Check-in / Check-out ───────────────
@@ -332,8 +341,6 @@ async function handleIncomingMessage(msg) {
     // ── Text commands ─────────────────────────────────────────
     if (!text) return;
 
-    const lower = text.toLowerCase();
-
     // Manager commands
     if (isFromManager) {
       await handleManagerCommand(lower, text, jid);
@@ -341,7 +348,6 @@ async function handleIncomingMessage(msg) {
     }
 
     // Employee commands
-    const emp = await db.getEmployeeByPhone(phone);
     if (!emp) return; // Ignore unknown numbers
 
     if (lower.includes('hi') || lower.includes('hello') || lower.includes('start')) {

@@ -23,9 +23,10 @@ async function connect(uri) {
 // ─── Employee Queries ──────────────────────────────────────────
 async function upsertEmployees(employees) {
   for (const emp of employees) {
+    // Upsert by name so we don't recreate them if their phone ID changes (e.g. to an @lid)
     await Employee.findOneAndUpdate(
-      { phone: emp.phone },
       { name: emp.name },
+      { $setOnInsert: { phone: emp.phone } }, // Only set phone if it's a new employee
       { upsert: true, new: true }
     );
   }
@@ -36,10 +37,19 @@ async function getEmployeeByWAId(waId) {
 }
 
 async function getEmployeeByPhone(phone) {
+  // If phone is an @lid or exactly matches the string, search exactly
+  if (phone.includes('@lid')) {
+    return await Employee.findOne({ phone: phone });
+  }
   const clean = phone.replace('@c.us', '').replace(/\D/g, '');
   const last10 = clean.slice(-10);
-  const all = await Employee.find({});
-  return all.find(e => e.phone && e.phone.replace(/\D/g, '').slice(-10) === last10) || null;
+  // Match either exact string, or ending with last 10 digits
+  return await Employee.findOne({ 
+    $or: [
+      { phone: phone },
+      { phone: { $regex: last10 + '$' } }
+    ]
+  });
 }
 
 async function linkWhatsappId(employeeId, waId) {
