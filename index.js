@@ -132,6 +132,24 @@ app.get('/qr', (req, res) => {
 </html>`);
 });
 
+// ── Logout API (Fixes "No sessions" / Stale keys) ────────────
+app.get('/logout', async (req, res) => {
+  try {
+    if (sock) {
+      await sock.logout();
+      sock = null;
+    }
+    // Delete session from DB
+    await mongoose.connection.collection('baileys_auth_keys').deleteMany({});
+    res.send('<h2 style="color:green">✅ WhatsApp Session Cleared!</h2><p>Please restart the server on Render, or wait 10 seconds and go to <a href="/qr">/qr</a> to scan again.</p>');
+    
+    // Force exit to restart container and start fresh
+    setTimeout(() => { process.exit(0); }, 3000);
+  } catch (err) {
+    res.status(500).send('❌ Error clearing session: ' + err.message);
+  }
+});
+
 // ── POS Invoice API ──────────────────────────────────────────
 // Called by the Flutter POS app after every sale
 app.post('/api/send-invoice', async (req, res) => {
