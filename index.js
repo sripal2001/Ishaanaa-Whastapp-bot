@@ -265,6 +265,12 @@ async function connectWhatsApp() {
       const reason     = DisconnectReason[statusCode] || statusCode;
       console.log(`⚠️ Disconnected. Reason: ${reason}`);
 
+      // If connection was replaced by another instance (Render deploy overlap), EXIT to kill duplicate!
+      if (reason === 'connectionReplaced' || statusCode === 440) {
+        console.log('🔄 Connection replaced by another instance. Exiting to prevent loop...');
+        process.exit(1);
+      }
+      
       // Always reconnect unless logged out
       if (statusCode !== DisconnectReason.loggedOut) {
         console.log('🔄 Reconnecting in 5s...');
