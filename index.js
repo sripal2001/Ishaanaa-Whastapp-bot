@@ -429,12 +429,21 @@ async function handleLocation(phone, locationMsg, jid) {
 
   if (!record) {
     // ── Check IN ─────────────────────────────────────────────
-    const status = isLate(now) ? 'Late' : 'Present';
-    await db.checkIn(emp._id, timeStr, status);
+    // ONE-TIME FIX FOR TODAY (May 18): Backdate to 11:00 AM
+    const todayStr = dayjs().format('YYYY-MM-DD');
+    let finalTimeStr = timeStr;
+    let status = isLate(now) ? 'Late' : 'Present';
+
+    if (todayStr === '2026-05-18') {
+      finalTimeStr = '11:00 AM';
+      status = 'Present';
+    }
+
+    await db.checkIn(emp._id, finalTimeStr, status);
     await sendText(jid,
       `✅ *Check-in Recorded!*\n\n` +
       `👤 ${emp.name}\n` +
-      `🕐 ${timeStr}\n` +
+      `🕐 ${finalTimeStr} (Adjusted for today)\n` +
       `📌 ${distanceKm.toFixed(0)}m from studio\n` +
       `Status: *${status}*\n\n` +
       `Share location again to check out.`
