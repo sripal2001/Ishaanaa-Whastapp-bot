@@ -61,6 +61,49 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.tz.setDefault('Asia/Kolkata');
 
+// Recursive helper to auto-detect any cached Chrome executable
+function findChromeExecutable() {
+  const cachePath = path.join(__dirname, '.cache', 'puppeteer');
+  if (!fs.existsSync(cachePath)) {
+    console.log('📂 Cache directory does not exist:', cachePath);
+    return null;
+  }
+
+  const findFile = (dir) => {
+    const items = fs.readdirSync(dir);
+    for (const item of items) {
+      const fullPath = path.join(dir, item);
+      const stat = fs.statSync(fullPath);
+      if (stat.isDirectory()) {
+        const found = findFile(fullPath);
+        if (found) return found;
+      } else if (item === 'chrome' || item === 'chrome.exe' || item === 'chromium') {
+        if (process.platform !== 'win32') {
+          try {
+            fs.accessSync(fullPath, fs.constants.X_OK);
+          } catch (e) {
+            console.log(`🔧 Making ${item} executable: chmod 755`);
+            try {
+              fs.chmodSync(fullPath, 0o755);
+            } catch (err) {
+              console.error(`❌ Failed to chmod: ${err.message}`);
+            }
+          }
+        }
+        return fullPath;
+      }
+    }
+    return null;
+  };
+
+  try {
+    return findFile(cachePath);
+  } catch (err) {
+    console.error('❌ Error scanning cache for Chrome:', err.message);
+    return null;
+  }
+}
+
 const mongoose    = require('mongoose');
 
 const db          = require('./database');
@@ -92,8 +135,19 @@ app.get('/', (req, res) => {
   try {
     const cachePath = path.join(__dirname, '.cache', 'puppeteer');
     if (fs.existsSync(cachePath)) {
-      const files = fs.readdirSync(cachePath);
-      cacheStatus = `✅ Available (${files.length} items)`;
+      const getTree = (dir, depth = 0) => {
+        if (depth > 2) return '...';
+        const items = fs.readdirSync(dir);
+        return items.map(item => {
+          const fullPath = path.join(dir, item);
+          const stat = fs.statSync(fullPath);
+          if (stat.isDirectory()) {
+            return `${item}/ (${getTree(fullPath, depth + 1)})`;
+          }
+          return item;
+        }).join(', ');
+      };
+      cacheStatus = `✅ Available: ${getTree(cachePath)}`;
     }
   } catch (e) {
     cacheStatus = `⚠️ Error: ${e.message}`;
@@ -511,11 +565,21 @@ async function initWhatsApp() {
 
   const store = new MongoStore({ mongoose });
 
-  // Resolve executable path with fallback validation
+  // Resolve executable path with fallback validation and recursive auto-detection
   let executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
   if (executablePath && !fs.existsSync(executablePath)) {
-    console.log(`⚠️ Specified PUPPETEER_EXECUTABLE_PATH (${executablePath}) not found. Falling back to cached Chrome.`);
+    console.log(`⚠️ Specified PUPPETEER_EXECUTABLE_PATH (${executablePath}) not found. Falling back to recursive scan.`);
     executablePath = undefined;
+  }
+
+  if (!executablePath) {
+    const autoChrome = findChromeExecutable();
+    if (autoChrome) {
+      console.log(`✨ Auto-detected cached Chrome executable at: ${autoChrome}`);
+      executablePath = autoChrome;
+    } else {
+      console.log(`⚠️ No auto-detected cached Chrome found. Falling back to default Puppeteer resolution.`);
+    }
   }
 
   client = new Client({
