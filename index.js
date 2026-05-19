@@ -44,6 +44,9 @@ const BOT_API_KEY  = process.env.BOT_API_KEY || 'ish-bot-secret-2024';
 // wwebjs uses @c.us (not @s.whatsapp.net like Baileys)
 const MANAGER_JID  = config.MANAGER_PHONE.replace(/\D/g, '') + '@c.us';
 
+// Configure Puppeteer Cache Dir so it works beautifully on Render
+process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || path.join(__dirname, '.cache', 'puppeteer');
+
 // ─── State ─────────────────────────────────────────────────────────────
 let client       = null;
 let latestQR     = null;
@@ -218,6 +221,13 @@ async function initWhatsApp() {
 
   const store = new MongoStore({ mongoose });
 
+  // Resolve executable path with fallback validation
+  let executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  if (executablePath && !fs.existsSync(executablePath)) {
+    console.log(`⚠️ Specified PUPPETEER_EXECUTABLE_PATH (${executablePath}) not found. Falling back to cached Chrome.`);
+    executablePath = undefined;
+  }
+
   client = new Client({
     authStrategy: new RemoteAuth({
       store,
@@ -225,8 +235,7 @@ async function initWhatsApp() {
     }),
     puppeteer: {
       headless: true,
-      // Use system Chromium installed by Dockerfile (set by PUPPETEER_EXECUTABLE_PATH env)
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      executablePath,
       // Args tuned for Render free tier (low RAM, Linux container)
       args: [
         '--no-sandbox',
