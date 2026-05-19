@@ -268,6 +268,10 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`   QR: http://localhost:${PORT}/qr`);
 });
 
+// In-memory store — persists messages for Signal session establishment
+// This is the CRITICAL piece that fixes "No sessions" for group sending
+const store = makeInMemoryStore({ logger: pino({ level: 'silent' }) });
+
 // ============================================================
 //  BAILEYS WHATSAPP CLIENT
 // ============================================================
@@ -286,16 +290,25 @@ async function connectWhatsApp() {
   sock = makeWASocket({
     version,
     auth: state,
-    logger: pino({ level: 'silent' }), // Suppress verbose logs
+    logger: pino({ level: 'silent' }),
     printQRInTerminal: true,
-    browser: Browsers.macOS('Desktop'), // Reliable signature
-    syncFullHistory: false,             // Key: don't sync old messages (saves RAM)
+    browser: Browsers.macOS('Desktop'),
+    syncFullHistory: false,
     markOnlineOnConnect: false,
     generateHighQualityLinkPreview: false,
-    getMessage: async () => {
-      return { conversation: 'ishaanaa-bot' }; // Prevents crash on message resolution
-    }
+    // CRITICAL: Proper getMessage using the in-memory store
+    // Without this, Baileys can't establish Signal sessions for group sends
+    getMessage: async (key) => {
+      if (store) {
+        const msg = await store.loadMessage(key.remoteJid, key.id);
+        return msg?.message || undefined;
+      }
+      return { conversation: 'hello' };
+    },
   });
+
+  // Bind store to socket — stores all received messages for session use
+  store.bind(sock.ev);
 
   // ── Save credentials whenever they update ─────────────────
   sock.ev.on('creds.update', saveCreds);
@@ -327,6 +340,16 @@ async function connectWhatsApp() {
       console.log('│  🌸 ISHAANAA DESIGNER STUDIO                │');
       console.log('│     WhatsApp Business Server v2.0 — LIVE    │');
       console.log('└─────────────────────────────────────────────┘\n');
+
+      // Pre-warm group sessions — fetches participants so Signal sessions
+      // are established before the first message is sent
+      try {
+        const groups = await sock.groupFetchAllParticipating();
+        const groupCount = Object.keys(groups).length;
+        console.log(`💬 Pre-warmed sessions for ${groupCount} group(s)`);
+      } catch (e) {
+        console.log('⚠️ Could not pre-warm group sessions:', e.message);
+      }
 
       // Notify manager the bot is online
       try {
