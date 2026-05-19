@@ -46,7 +46,7 @@ process.on('unhandledRejection', (r)   => {
 });
 
 // ─── Imports ───────────────────────────────────────────────────────────
-const { Client, RemoteAuth, MessageTypes, MessageMedia } = require('whatsapp-web.js');
+const { Client, RemoteAuth, LocalAuth, MessageTypes, MessageMedia } = require('whatsapp-web.js');
 const { MongoStore } = require('wwebjs-mongo');
 const QRCode      = require('qrcode');
 const express     = require('express');
@@ -583,11 +583,7 @@ async function initWhatsApp() {
   }
 
   client = new Client({
-    authStrategy: new RemoteAuth({
-      clientId: 'ishaanaa-bot',
-      store,
-      backupSyncIntervalMs: 300000, // Save session every 5 min
-    }),
+    authStrategy: new LocalAuth({ clientId: 'ishaanaa-bot' }),
     puppeteer: {
       headless: true,
       executablePath,
