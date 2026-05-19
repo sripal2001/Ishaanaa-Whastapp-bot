@@ -143,6 +143,23 @@ app.get('/qr', (req, res) => {
 </html>`);
 });
 
+// ── Debug endpoint — shows connection state ─────────────────
+app.get('/debug', async (req, res) => {
+  let groups = [];
+  try {
+    if (sock && isConnected) {
+      const chats = await sock.groupFetchAllParticipating();
+      groups = Object.values(chats).map(g => ({ id: g.id, name: g.subject }));
+    }
+  } catch (e) {}
+  res.json({
+    connected: isConnected,
+    targetGroupId,
+    configGroupName: config.GROUP_NAME,
+    groups,
+  });
+});
+
 // ── Logout API (Fixes "No sessions" / Stale keys) ────────────
 app.get('/logout', async (req, res) => {
   try {
@@ -392,17 +409,19 @@ async function handleIncomingMessage(msg) {
           const meta = await sock.groupMetadata(jid);
           const actualName = (meta.subject || '').trim();
           const configName = (config.GROUP_NAME || '').trim();
-          console.log(`🔍 Group message from: "${actualName}" | Expected: "${configName}"`);
+          console.log(`🔍 GROUP MSG: actual="${actualName}" | config="${configName}"`);
           if (actualName.toLowerCase() === configName.toLowerCase()) {
-            targetGroupId = jid; // Cache the correct group ID
+            targetGroupId = jid;
             console.log(`✅ Locked to group: ${actualName} (${jid})`);
           } else {
-            console.log(`⛔ Ignoring non-target group: "${actualName}"`);
-            return; // Ignore this group
+            // Log and skip — check /debug endpoint to see what name WhatsApp is using
+            console.log(`⛔ SKIPPED non-target group: "${actualName}" | JID: ${jid}`);
+            console.log(`   ➡ If this is your group, update GROUP_NAME in config.js to: "${actualName}"`);
+            return;
           }
         } catch (e) {
           console.log(`⚠️ Could not fetch group metadata for ${jid}: ${e.message}`);
-          return; // If fetch fails, ignore
+          return;
         }
       } else if (jid !== targetGroupId) {
         return; // Ignore all other groups instantly
@@ -710,12 +729,24 @@ function setupSchedules() {
 // ============================================================
 //  UTILITY FUNCTIONS
 // ============================================================
-async function sendText(jid, text) {
+async function sendText(jid, text, retries = 4) {
   if (!sock || !isConnected) return;
-  try {
-    await sock.sendMessage(jid, { text });
-  } catch (err) {
-    console.error(`❌ Failed to send to ${jid}:`, err.message);
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await sock.sendMessage(jid, { text });
+      return; // success
+    } catch (err) {
+      const isSessionErr = err.message?.toLowerCase().includes('no sessions') ||
+                           err.message?.toLowerCase().includes('session');
+      if (isSessionErr && attempt < retries) {
+        const delay = attempt * 2000; // 2s, 4s, 6s
+        console.log(`⏳ No session yet (attempt ${attempt}/${retries}), retrying in ${delay/1000}s...`);
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        console.error(`❌ Failed to send to ${jid}:`, err.message);
+        return;
+      }
+    }
   }
 }
 
