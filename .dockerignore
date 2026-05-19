@@ -1,0 +1,9 @@
+node_modules
+.wwebjs_auth
+.wwebjs_cache
+*.db
+*.db-shm
+*.db-wal
+bot-log.txt
+.git
+.gitignore
