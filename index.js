@@ -6,6 +6,16 @@
 
 'use strict';
 
+// Polyfill global crypto for Node < 19 (required by @whiskeysockets/baileys)
+try {
+  const { webcrypto } = require('crypto');
+  if (!globalThis.crypto) {
+    globalThis.crypto = webcrypto;
+  }
+} catch (e) {
+  console.warn('⚠️ Web Crypto API polyfill failed:', e.message);
+}
+
 // Ensure all dates are processed in IST (Indian Standard Time)
 process.env.TZ = 'Asia/Kolkata';
 
@@ -21,6 +31,7 @@ const {
   makeInMemoryStore,
   jidNormalizedUser,
   downloadContentFromMessage,
+  Browsers,
 } = require('@whiskeysockets/baileys');
 const pino        = require('pino');
 const QRCode      = require('qrcode');
@@ -46,7 +57,7 @@ const { useMongoDBAuthState } = require('./baileys-auth-mongo');
 
 // ─── Environment ─────────────────────────────────────────────
 const PORT         = process.env.PORT || 10000;
-const MONGODB_URI  = process.env.MONGODB_URI;
+const MONGODB_URI  = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/ishaanaa-pos";
 const BOT_API_KEY  = process.env.BOT_API_KEY || 'ish-bot-secret-2024';
 const MANAGER_JID  = config.MANAGER_PHONE.replace(/\D/g, '') + '@s.whatsapp.net';
 
@@ -150,6 +161,46 @@ app.get('/logout', async (req, res) => {
   }
 });
 
+// ── Pairing Code API ─────────────────────────────────────────
+app.get('/pair', async (req, res) => {
+  const phone = req.query.phone;
+  if (!phone) {
+    return res.send(`
+      <h2>Link via Phone Number</h2>
+      <p>If QR scanning fails, you can link using an 8-character code.</p>
+      <form action="/pair" method="GET">
+        <label>Enter WhatsApp Number (with country code, e.g., 919876543210):</label><br><br>
+        <input type="text" name="phone" required placeholder="91..." />
+        <button type="submit">Get Code</button>
+      </form>
+    `);
+  }
+
+  if (isConnected) {
+    return res.send('<h2 style="color:green">✅ Already connected!</h2>');
+  }
+
+  if (!sock) {
+    return res.send('⏳ Socket not ready. Wait a moment and refresh.');
+  }
+
+  try {
+    const code = await sock.requestPairingCode(phone);
+    res.send(`
+      <h2>✅ Pairing Code Generated: <span style="letter-spacing: 2px; color: blue;">${code}</span></h2>
+      <ol>
+        <li>Open WhatsApp on your phone</li>
+        <li>Go to <b>Settings &gt; Linked Devices &gt; Link a Device</b></li>
+        <li>Tap <b>Link with phone number instead</b> (usually at the bottom)</li>
+        <li>Enter the code above!</li>
+      </ol>
+      <p>After entering, the bot will connect automatically.</p>
+    `);
+  } catch (err) {
+    res.send('❌ Error getting pairing code: ' + err.message);
+  }
+});
+
 // ── POS Invoice API ──────────────────────────────────────────
 // Called by the Flutter POS app after every sale
 app.post('/api/send-invoice', async (req, res) => {
@@ -204,8 +255,14 @@ app.listen(PORT, '0.0.0.0', () => {
 //  BAILEYS WHATSAPP CLIENT
 // ============================================================
 async function connectWhatsApp() {
-  const { version } = await fetchLatestBaileysVersion();
-  console.log(`📱 Using WhatsApp Web v${version.join('.')}`);
+  let version = [2, 3000, 1035194821]; // Fallback version
+  try {
+    const { version: fetchedVersion } = await fetchLatestBaileysVersion();
+    version = fetchedVersion;
+    console.log(`📱 Using WhatsApp Web v${version.join('.')}`);
+  } catch (e) {
+    console.log(`📱 Using hardcoded fallback WhatsApp Web v${version.join('.')}`);
+  }
 
   const { state, saveCreds } = await useMongoDBAuthState();
 
@@ -214,10 +271,13 @@ async function connectWhatsApp() {
     auth: state,
     logger: pino({ level: 'silent' }), // Suppress verbose logs
     printQRInTerminal: true,
-    browser: ['Ishaanaa Bot', 'Chrome', '120.0.0'],
-    syncFullHistory: false,        // ← Key: don't sync old messages (saves RAM)
+    browser: Browsers.macOS('Desktop'), // Reliable signature
+    syncFullHistory: false,             // Key: don't sync old messages (saves RAM)
     markOnlineOnConnect: false,
     generateHighQualityLinkPreview: false,
+    getMessage: async () => {
+      return { conversation: 'ishaanaa-bot' }; // Prevents crash on message resolution
+    }
   });
 
   // ── Save credentials whenever they update ─────────────────
@@ -264,6 +324,7 @@ async function connectWhatsApp() {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const reason     = DisconnectReason[statusCode] || statusCode;
       console.log(`⚠️ Disconnected. Reason: ${reason}`);
+      console.error('Connection close error:', lastDisconnect?.error);
 
       // If connection was replaced by another instance (Render deploy overlap), EXIT to kill duplicate!
       if (reason === 'connectionReplaced' || statusCode === 440) {

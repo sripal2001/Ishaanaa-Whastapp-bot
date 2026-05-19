@@ -5,7 +5,7 @@
 // ============================================================
 
 const mongoose = require('mongoose');
-const { BufferJSON, initAuthCreds } = require('@whiskeysockets/baileys');
+const { BufferJSON, initAuthCreds, proto } = require('@whiskeysockets/baileys');
 
 // ─── Schema ──────────────────────────────────────────────────
 const AuthKeySchema = new mongoose.Schema({
@@ -60,8 +60,11 @@ async function useMongoDBAuthState() {
           const data = {};
           await Promise.all(
             ids.map(async (id) => {
-              const value = await readData(`${type}-${id}`);
-              if (value) data[id] = value;
+              let value = await readData(`${type}-${id}`);
+              if (type === 'app-state-sync-key' && value) {
+                value = proto.Message.AppStateSyncKeyData.fromObject(value);
+              }
+              data[id] = value;
             })
           );
           return data;

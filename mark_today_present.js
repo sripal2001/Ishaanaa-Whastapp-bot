@@ -3,7 +3,7 @@ const dayjs = require('dayjs');
 const { Employee, Attendance } = require('./models');
 const config = require('./config');
 
-const MONGODB_URI = "mongodb+srv://sripalsripal2001:Sripal7032@cluster0.p7d5s.mongodb.net/ishaanaa-pos?retryWrites=true&w=majority";
+const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://sripalsripal2001:Sripal7032@cluster0.p7d5s.mongodb.net/ishaanaa-pos?retryWrites=true&w=majority";
 
 async function run() {
   try {
