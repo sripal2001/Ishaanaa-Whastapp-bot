@@ -46,8 +46,8 @@ process.on('unhandledRejection', (r)   => {
 });
 
 // ─── Imports ───────────────────────────────────────────────────────────
-const { Client, RemoteAuth, LocalAuth, MessageTypes, MessageMedia } = require('whatsapp-web.js');
-const { MongoStore } = require('wwebjs-mongo');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
+const pino = require('pino');
 const QRCode      = require('qrcode');
 const express     = require('express');
 const schedule    = require('node-schedule');
@@ -61,48 +61,7 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.tz.setDefault('Asia/Kolkata');
 
-// Recursive helper to auto-detect any cached Chrome executable
-function findChromeExecutable() {
-  const cachePath = path.join(__dirname, '.cache', 'puppeteer');
-  if (!fs.existsSync(cachePath)) {
-    console.log('📂 Cache directory does not exist:', cachePath);
-    return null;
-  }
 
-  const findFile = (dir) => {
-    const items = fs.readdirSync(dir);
-    for (const item of items) {
-      const fullPath = path.join(dir, item);
-      const stat = fs.statSync(fullPath);
-      if (stat.isDirectory()) {
-        const found = findFile(fullPath);
-        if (found) return found;
-      } else if (item === 'chrome' || item === 'chrome.exe' || item === 'chromium') {
-        if (process.platform !== 'win32') {
-          try {
-            fs.accessSync(fullPath, fs.constants.X_OK);
-          } catch (e) {
-            console.log(`🔧 Making ${item} executable: chmod 755`);
-            try {
-              fs.chmodSync(fullPath, 0o755);
-            } catch (err) {
-              console.error(`❌ Failed to chmod: ${err.message}`);
-            }
-          }
-        }
-        return fullPath;
-      }
-    }
-    return null;
-  };
-
-  try {
-    return findFile(cachePath);
-  } catch (err) {
-    console.error('❌ Error scanning cache for Chrome:', err.message);
-    return null;
-  }
-}
 
 const mongoose    = require('mongoose');
 
@@ -114,8 +73,8 @@ const config      = require('./config');
 const PORT         = process.env.PORT || 10000;
 const MONGODB_URI  = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/ishaanaa-pos';
 const BOT_API_KEY  = process.env.BOT_API_KEY || 'ish-bot-secret-2024';
-// wwebjs uses @c.us (not @s.whatsapp.net like Baileys)
-const MANAGER_JID  = config.MANAGER_PHONE.replace(/\D/g, '') + '@c.us';
+// wwebjs uses @s.whatsapp.net (not @s.whatsapp.net like Baileys)
+const MANAGER_JID  = config.MANAGER_PHONE.replace(/\D/g, '') + '@s.whatsapp.net';
 
 // ─── State ─────────────────────────────────────────────────────────────
 let client       = null;
@@ -477,14 +436,6 @@ app.get('/qr', (req, res) => {
 // ── Debug endpoint ────────────────────────────────────────────
 app.get('/debug', async (req, res) => {
   let groups = [];
-  try {
-    if (client && isConnected) {
-      const chats = await client.getChats();
-      groups = chats
-        .filter(c => c.isGroup)
-        .map(c => ({ id: c.id._serialized, name: c.name }));
-    }
-  } catch (e) {}
   res.json({
     connected: isConnected,
     targetGroupId,
@@ -497,14 +448,13 @@ app.get('/debug', async (req, res) => {
 app.get('/logout', async (req, res) => {
   try {
     if (client) {
-      await client.logout();
+      client.logout();
       client = null;
     }
-    // Delete session from DB
-    await mongoose.connection.collection('remote_auth_sessions').deleteMany({});
-    res.send('<h2 style="color:green">✅ WhatsApp Session Cleared!</h2><p>Please restart the server on Render, or wait 10 seconds and go to <a href="/qr">/qr</a> to scan again.</p>');
-    
-    // Force exit to restart container and start fresh
+    if (fs.existsSync('auth_info_baileys')) {
+      fs.rmSync('auth_info_baileys', { recursive: true, force: true });
+    }
+    res.send('<h2 style="color:green">✅ WhatsApp Session Cleared!</h2><p>Please wait 10 seconds and go to <a href="/qr">/qr</a> to scan again.</p>');
     setTimeout(() => { process.exit(0); }, 3000);
   } catch (err) {
     res.status(500).send('❌ Error clearing session: ' + err.message);
@@ -531,16 +481,17 @@ app.post('/api/send-invoice', async (req, res) => {
 
   try {
     const cleanPhone = phone.replace(/\D/g, '');
-    const jid = (cleanPhone.length === 10 ? '91' + cleanPhone : cleanPhone) + '@c.us';
+    const jid = (cleanPhone.length === 10 ? '91' + cleanPhone : cleanPhone) + '@s.whatsapp.net';
 
     const invoiceFilename = filename || `Invoice_${Date.now()}.pdf`;
+    const pdfBuffer = Buffer.from(pdfBase64, 'base64');
 
-    // Send PDF document first using MessageMedia (base64 string)
-    const media = new MessageMedia('application/pdf', pdfBase64, invoiceFilename);
-    await client.sendMessage(jid, media);
-
-    // Send the text message
-    await client.sendMessage(jid, message);
+    await client.sendMessage(jid, {
+      document: pdfBuffer,
+      mimetype: 'application/pdf',
+      fileName: invoiceFilename
+    });
+    await client.sendMessage(jid, { text: message });
 
     console.log(`✅ Invoice sent to ${phone} (${invoiceFilename})`);
     res.json({ success: true, message: `Invoice sent to ${phone}` });
@@ -560,92 +511,57 @@ app.listen(PORT, '0.0.0.0', () => {
 //  WHATSAPP CLIENT (whatsapp-web.js + Chromium)
 // ============================================================
 async function initWhatsApp() {
-  // Ensure MongoDB is connected before creating MongoStore
   await mongoose.connection.asPromise();
 
-  const store = new MongoStore({ mongoose });
+  const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
-  // Resolve executable path with fallback validation and recursive auto-detection
-  let executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-  if (executablePath && !fs.existsSync(executablePath)) {
-    console.log(`⚠️ Specified PUPPETEER_EXECUTABLE_PATH (${executablePath}) not found. Falling back to recursive scan.`);
-    executablePath = undefined;
-  }
+  client = makeWASocket({
+    auth: state,
+    printQRInTerminal: false,
+    logger: pino({ level: 'silent' }),
+    browser: Browsers.macOS('Desktop'),
+  });
 
-  if (!executablePath) {
-    const autoChrome = findChromeExecutable();
-    if (autoChrome) {
-      console.log(`✨ Auto-detected cached Chrome executable at: ${autoChrome}`);
-      executablePath = autoChrome;
-    } else {
-      console.log(`⚠️ No auto-detected cached Chrome found. Falling back to default Puppeteer resolution.`);
+  client.ev.on('creds.update', saveCreds);
+
+  client.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      latestQR = qr;
+      isConnected = false;
+      const renderUrl = process.env.RENDER_EXTERNAL_URL || '';
+      console.log('\\n📸 QR CODE GENERATED');
+      if (renderUrl) console.log(`👆 Scan at: ${renderUrl}/qr`);
     }
-  }
 
-  client = new Client({
-    authStrategy: new LocalAuth({ clientId: 'ishaanaa-bot' }),
-    puppeteer: {
-      headless: true,
-      executablePath,
-      // Args tuned for Render free tier (low RAM, Linux container)
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process', // Reduces RAM significantly
-        '--disable-gpu',
-      ],
-    },
+    if (connection === 'close') {
+      isConnected = false;
+      const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log('⚠️ Disconnected:', lastDisconnect.error?.message);
+      if (shouldReconnect) {
+        setTimeout(initWhatsApp, 5000);
+      } else {
+        console.log('❌ Logged out. Deleting session to start fresh.');
+        try { fs.rmSync('auth_info_baileys', { recursive: true, force: true }); } catch(e) {}
+        setTimeout(initWhatsApp, 5000);
+      }
+    } else if (connection === 'open') {
+      isConnected = true;
+      latestQR = null;
+      targetGroupId = null;
+      console.log('\\n✅ WhatsApp Business Connected (Baileys)!');
+    }
   });
 
-  client.on('qr', qr => {
-    latestQR = qr;
-    isConnected = false;
-    const renderUrl = process.env.RENDER_EXTERNAL_URL || '';
-    console.log('\n📸 QR CODE GENERATED');
-    if (renderUrl) console.log(`👆 Scan at: ${renderUrl}/qr`);
-  });
+  client.ev.on('messages.upsert', async (m) => {
+    if (m.type !== 'notify') return;
+    const msg = m.messages[0];
+    if (!msg.message) return;
+    if (msg.key.fromMe) return;
 
-  client.on('authenticated', () => {
-    console.log('✅ Authenticated to WhatsApp! Session is valid.');
-  });
-
-  client.on('auth_failure', msg => {
-    console.error('❌ Authentication failure:', msg);
-  });
-
-  client.on('remote_session_saved', () => {
-    console.log('💾 Remote session successfully saved to MongoDB!');
-  });
-
-  client.on('ready', async () => {
-    isConnected = true;
-    latestQR = null;
-    targetGroupId = null; // Reset so group is re-detected
-    console.log('\n✅ WhatsApp Business Connected!');
-    console.log('┌────────────────────────────────────────────┐');
-    console.log('│  🌸 ISHAANAA DESIGNER STUDIO                │');
-    console.log('│     WhatsApp Business Server v3.0 — LIVE  │');
-    console.log('└────────────────────────────────────────────┘\n');
-  });
-
-  client.on('disconnected', reason => {
-    isConnected = false;
-    console.log('⚠️ Disconnected:', reason);
-    // Re-initialize after 10s
-    setTimeout(() => initWhatsApp(), 10000);
-  });
-
-  // Main message handler
-  client.on('message', async msg => {
-    if (msg.fromMe) return;
     await handleIncomingMessage(msg);
   });
-
-  await client.initialize();
 }
 
 // ============================================================
@@ -654,19 +570,19 @@ async function initWhatsApp() {
 
 async function handleIncomingMessage(msg) {
   try {
-    const chat      = await msg.getChat();
-    const isGroup   = chat.isGroup;
-    const jid       = msg.from;                           // Group or personal JID
-    const senderJid = isGroup ? msg.author : msg.from;    // Real sender
-    const phone     = (senderJid || '').replace('@c.us', '').replace('@s.whatsapp.net', '');
-    const isFromManager = senderJid === MANAGER_JID;
+    const jid = msg.key.remoteJid;
+    const isGroup = jid.endsWith('@g.us');
+    const senderJid = isGroup ? msg.key.participant : jid;
+    const phone = (senderJid || '').replace('@s.whatsapp.net', '').replace('@g.us', '').replace(/:\d+/, '');
+    const isFromManager = senderJid.startsWith(MANAGER_JID.split('@')[0]);
 
-    const text  = (msg.body || '').trim();
+    const messageContent = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+    const text = (messageContent || '').trim();
     const lower = text.toLowerCase();
-    const isLocation = msg.type === MessageTypes.LOCATION;
 
-    // In wwebjs, sending to group JID works perfectly — no LID session issues!
-    // replyJid is simply the chat JID (group or DM)
+    const locationMessage = msg.message.locationMessage || msg.message.liveLocationMessage;
+    const isLocation = !!locationMessage;
+
     const replyJid = jid;
 
     // Allow manager DMs; allow employee DMs; ignore unknown DMs
@@ -678,16 +594,8 @@ async function handleIncomingMessage(msg) {
     // Filter to target group only
     if (isGroup) {
       if (!targetGroupId) {
-        const groupName = chat.name.trim();
-        const configName = (config.GROUP_NAME || '').trim();
-        console.log(`🔍 GROUP: "${groupName}" | config: "${configName}"`);
-        if (groupName.toLowerCase() === configName.toLowerCase()) {
-          targetGroupId = jid;
-          console.log(`✅ Locked to group: ${groupName} (${jid})`);
-        } else {
-          console.log(`⛔ Skipped group "${groupName}"`);
-          return;
-        }
+        targetGroupId = jid;
+        console.log(`✅ Locked to group: ${jid}`);
       } else if (jid !== targetGroupId) {
         return;
       }
@@ -706,7 +614,7 @@ async function handleIncomingMessage(msg) {
         existingEmp.phone = phone;
         await existingEmp.save();
         const cfgEmp = config.EMPLOYEES.find(e => e.name.toLowerCase() === name.toLowerCase());
-        const regJid = cfgEmp ? `${cfgEmp.phone}@c.us` : null;
+        const regJid = cfgEmp ? `${cfgEmp.phone}@s.whatsapp.net` : null;
         if (regJid) await sendText(regJid, `✅ Linked to *${existingEmp.name}*! Share your location to check in.`);
         console.log(`✅ Registered LID ${phone} as ${existingEmp.name}`);
       } else {
@@ -724,8 +632,8 @@ async function handleIncomingMessage(msg) {
     // Location = Check-in / Check-out
     if (isLocation) {
       const location = {
-        latitude:  msg.location.latitude,
-        longitude: msg.location.longitude,
+        latitude:  locationMessage.degreesLatitude,
+        longitude: locationMessage.degreesLongitude,
       };
       await handleLocation(phone, location, replyJid);
       return;
@@ -765,7 +673,7 @@ async function handleIncomingMessage(msg) {
     }
     if (lower.startsWith('leave')) {
       const leaveDate = text.split(' ').slice(1).join(' ').trim() || dayjs().format('YYYY-MM-DD');
-      await db.requestLeave(emp._id, leaveDate, msg.id._serialized || msg.id);
+      await db.requestLeave(emp._id, leaveDate, msg.key.id);
       await sendText(replyJid, `✅ Leave request for *${leaveDate}* sent to manager.`);
       await sendText(MANAGER_JID, `🙋 *Leave Request*\n\n*${emp.name}* → *${leaveDate}*\n\nReply: *approve ${emp.name}* or *reject ${emp.name}*`);
       return;
@@ -866,13 +774,13 @@ async function handleManagerCommand(lower, text, replyJid) {
       const filepath = await reports.generateMonthlyExcel(now.year(), now.month() + 1);
       const filename = path.basename(filepath);
       
-      const base64Data = fs.readFileSync(filepath).toString('base64');
-      const media = new MessageMedia(
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        base64Data,
-        filename
-      );
-      await client.sendMessage(replyJid, media, { caption: `📅 Attendance Report for ${now.format('MMMM YYYY')}` });
+      const buffer = fs.readFileSync(filepath);
+      await client.sendMessage(replyJid, {
+        document: buffer,
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        fileName: filename,
+        caption: `📅 Attendance Report for ${now.format('MMMM YYYY')}`
+      });
       
       // Cleanup
       setTimeout(() => fs.unlink(filepath, () => {}), 2000);
@@ -892,7 +800,7 @@ async function handleManagerCommand(lower, text, replyJid) {
     const today = dayjs().format('YYYY-MM-DD');
     await db.requestLeave(emp._id, today, 'manager-approved-' + Date.now());
     const cleanPhone = emp.phone.replace(/\D/g, '');
-    const empJid = (cleanPhone.length === 10 ? '91' + cleanPhone : cleanPhone) + '@c.us';
+    const empJid = (cleanPhone.length === 10 ? '91' + cleanPhone : cleanPhone) + '@s.whatsapp.net';
     await sendText(empJid, `✅ Your leave for *${today}* has been *approved* by the manager.`);
     await sendText(replyJid, `✅ Leave approved for *${emp.name}*.`);
     return;
@@ -906,7 +814,7 @@ async function handleManagerCommand(lower, text, replyJid) {
       return;
     }
     const cleanPhone = emp.phone.replace(/\D/g, '');
-    const empJid = (cleanPhone.length === 10 ? '91' + cleanPhone : cleanPhone) + '@c.us';
+    const empJid = (cleanPhone.length === 10 ? '91' + cleanPhone : cleanPhone) + '@s.whatsapp.net';
     await sendText(empJid, `❌ Your leave request has been *rejected* by the manager.`);
     await sendText(replyJid, `✅ Leave rejected for *${emp.name}*.`);
     return;
@@ -934,7 +842,7 @@ function setupSchedules() {
   schedule.scheduleJob('0 9 * * 1-6', async () => {
     const employees = await db.getAllEmployees();
     for (const emp of employees) {
-      const jid = '91' + emp.phone.replace(/\D/g, '').slice(-10) + '@c.us';
+      const jid = '91' + emp.phone.replace(/\D/g, '').slice(-10) + '@s.whatsapp.net';
       try {
         await sendText(jid, `🌅 Good morning ${emp.name}! Please share your location to mark attendance.`);
         await new Promise(r => setTimeout(r, 1000)); // 1s delay between messages
@@ -989,7 +897,7 @@ async function sendText(jid, text) {
     return;
   }
   try {
-    await client.sendMessage(jid, text);
+    await client.sendMessage(jid, { text: text });
   } catch (err) {
     console.error(`❌ Failed to send to ${jid}:`, err.message);
   }
