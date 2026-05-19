@@ -8,3 +8,5 @@ node_modules/
 .wwebjs_cache/
 auth_info_baileys/
 baileys_store.json
+.cache
+.cache/

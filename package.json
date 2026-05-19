@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "postinstall": "PUPPETEER_CACHE_DIR=.cache/puppeteer npx puppeteer browsers install chrome"
+    "postinstall": "node node_modules/puppeteer/install.mjs"
   },
   "keywords": [],
   "author": "Ishaanaa Information Technologies",
