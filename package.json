@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "postinstall": "npx cross-env PUPPETEER_CACHE_DIR=.cache/puppeteer npx puppeteer browsers install chrome"
+    "postinstall": "PUPPETEER_CACHE_DIR=.cache/puppeteer npx puppeteer browsers install chrome"
   },
   "keywords": [],
   "author": "Ishaanaa Information Technologies",
