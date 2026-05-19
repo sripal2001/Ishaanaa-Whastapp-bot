@@ -1,39 +1,21 @@
 // ============================================================
 //  ISHAANAA DESIGNER STUDIO
-//  WhatsApp Business Server v2.0 (Baileys — No Browser)
+//  WhatsApp Business Server v3.0 (whatsapp-web.js)
 //  Handles: Employee Attendance + POS Invoice Delivery
 // ============================================================
 
 'use strict';
 
-// Polyfill global crypto for Node < 19 (required by @whiskeysockets/baileys)
-try {
-  const { webcrypto } = require('crypto');
-  if (!globalThis.crypto) {
-    globalThis.crypto = webcrypto;
-  }
-} catch (e) {
-  console.warn('⚠️ Web Crypto API polyfill failed:', e.message);
-}
-
 // Ensure all dates are processed in IST (Indian Standard Time)
 process.env.TZ = 'Asia/Kolkata';
 
-// ─── Global Error Handlers ───────────────────────────────────
-process.on('uncaughtException',  (err) => console.error('❌ UNCAUGHT:', err.message, err.stack));
+// ─── Global Error Handlers ────────────────────────────────────────
+process.on('uncaughtException',  (err) => console.error('❌ UNCAUGHT:', err.message));
 process.on('unhandledRejection', (r)   => console.error('❌ REJECTION:', r));
 
-// ─── Imports ─────────────────────────────────────────────────
-const {
-  default: makeWASocket,
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-  makeInMemoryStore,
-  jidNormalizedUser,
-  downloadContentFromMessage,
-  Browsers,
-} = require('@whiskeysockets/baileys');
-const pino        = require('pino');
+// ─── Imports ───────────────────────────────────────────────────────────
+const { Client, RemoteAuth, MessageTypes, MessageMedia } = require('whatsapp-web.js');
+const { MongoStore } = require('wwebjs-mongo');
 const QRCode      = require('qrcode');
 const express     = require('express');
 const schedule    = require('node-schedule');
@@ -48,23 +30,25 @@ dayjs.extend(timezone);
 dayjs.tz.setDefault('Asia/Kolkata');
 
 const mongoose    = require('mongoose');
-const { Boom }    = require('@hapi/boom');
+const path        = require('path');
+const fs          = require('fs');
 
 const db          = require('./database');
 const reports     = require('./reports');
 const config      = require('./config');
-const { useMongoDBAuthState } = require('./baileys-auth-mongo');
 
-// ─── Environment ─────────────────────────────────────────────
+// ─── Environment ─────────────────────────────────────────────────────────
 const PORT         = process.env.PORT || 10000;
-const MONGODB_URI  = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/ishaanaa-pos";
+const MONGODB_URI  = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/ishaanaa-pos';
 const BOT_API_KEY  = process.env.BOT_API_KEY || 'ish-bot-secret-2024';
-const MANAGER_JID  = config.MANAGER_PHONE.replace(/\D/g, '') + '@s.whatsapp.net';
+// wwebjs uses @c.us (not @s.whatsapp.net like Baileys)
+const MANAGER_JID  = config.MANAGER_PHONE.replace(/\D/g, '') + '@c.us';
 
-// ─── State ───────────────────────────────────────────────────
-let sock         = null;
+// ─── State ─────────────────────────────────────────────────────────────
+let client       = null;
 let latestQR     = null;
 let isConnected  = false;
+let targetGroupId = null;
 
 // ============================================================
 //  HEARTBEAT + API SERVER (Express)
@@ -143,32 +127,34 @@ app.get('/qr', (req, res) => {
 </html>`);
 });
 
-// ── Debug endpoint — shows connection state ─────────────────
+// ── Debug endpoint ────────────────────────────────────────────
 app.get('/debug', async (req, res) => {
   let groups = [];
   try {
-    if (sock && isConnected) {
-      const chats = await sock.groupFetchAllParticipating();
-      groups = Object.values(chats).map(g => ({ id: g.id, name: g.subject }));
+    if (client && isConnected) {
+      const chats = await client.getChats();
+      groups = chats
+        .filter(c => c.isGroup)
+        .map(c => ({ id: c.id._serialized, name: c.name }));
     }
   } catch (e) {}
   res.json({
     connected: isConnected,
     targetGroupId,
     configGroupName: config.GROUP_NAME,
-    groups,
+    groups: groups.slice(0, 50),
   });
 });
 
 // ── Logout API (Fixes "No sessions" / Stale keys) ────────────
 app.get('/logout', async (req, res) => {
   try {
-    if (sock) {
-      await sock.logout();
-      sock = null;
+    if (client) {
+      await client.logout();
+      client = null;
     }
     // Delete session from DB
-    await mongoose.connection.collection('baileys_auth_keys').deleteMany({});
+    await mongoose.connection.collection('remote_auth_sessions').deleteMany({});
     res.send('<h2 style="color:green">✅ WhatsApp Session Cleared!</h2><p>Please restart the server on Render, or wait 10 seconds and go to <a href="/qr">/qr</a> to scan again.</p>');
     
     // Force exit to restart container and start fresh
@@ -180,79 +166,34 @@ app.get('/logout', async (req, res) => {
 
 // ── Pairing Code API ─────────────────────────────────────────
 app.get('/pair', async (req, res) => {
-  const phone = req.query.phone;
-  if (!phone) {
-    return res.send(`
-      <h2>Link via Phone Number</h2>
-      <p>If QR scanning fails, you can link using an 8-character code.</p>
-      <form action="/pair" method="GET">
-        <label>Enter WhatsApp Number (with country code, e.g., 919876543210):</label><br><br>
-        <input type="text" name="phone" required placeholder="91..." />
-        <button type="submit">Get Code</button>
-      </form>
-    `);
-  }
-
-  if (isConnected) {
-    return res.send('<h2 style="color:green">✅ Already connected!</h2>');
-  }
-
-  if (!sock) {
-    return res.send('⏳ Socket not ready. Wait a moment and refresh.');
-  }
-
-  try {
-    const code = await sock.requestPairingCode(phone);
-    res.send(`
-      <h2>✅ Pairing Code Generated: <span style="letter-spacing: 2px; color: blue;">${code}</span></h2>
-      <ol>
-        <li>Open WhatsApp on your phone</li>
-        <li>Go to <b>Settings &gt; Linked Devices &gt; Link a Device</b></li>
-        <li>Tap <b>Link with phone number instead</b> (usually at the bottom)</li>
-        <li>Enter the code above!</li>
-      </ol>
-      <p>After entering, the bot will connect automatically.</p>
-    `);
-  } catch (err) {
-    res.send('❌ Error getting pairing code: ' + err.message);
-  }
+  return res.send('<h2>Feature Not Supported</h2><p>wwebjs only supports QR code scanning.</p>');
 });
 
-// ── POS Invoice API ──────────────────────────────────────────
-// Called by the Flutter POS app after every sale
+// ── POS Invoice API ───────────────────────────────────────────
 app.post('/api/send-invoice', async (req, res) => {
-  // Auth check
   const apiKey = req.headers['x-api-key'];
-  if (!apiKey || apiKey !== BOT_API_KEY) {
+  if (!apiKey || apiKey !== BOT_API_KEY)
     return res.status(401).json({ error: 'Unauthorized' });
-  }
 
-  if (!isConnected || !sock) {
+  if (!isConnected || !client)
     return res.status(503).json({ error: 'WhatsApp not connected. Scan QR first.' });
-  }
 
   const { phone, message, pdfBase64, filename } = req.body;
-  if (!phone || !message || !pdfBase64) {
-    return res.status(400).json({ error: 'Missing required fields: phone, message, pdfBase64' });
-  }
+  if (!phone || !message || !pdfBase64)
+    return res.status(400).json({ error: 'Missing: phone, message, pdfBase64' });
 
   try {
-    // Format phone number to WhatsApp JID
     const cleanPhone = phone.replace(/\D/g, '');
-    const jid = (cleanPhone.length === 10 ? '91' + cleanPhone : cleanPhone) + '@s.whatsapp.net';
+    const jid = (cleanPhone.length === 10 ? '91' + cleanPhone : cleanPhone) + '@c.us';
 
-    const pdfBuffer = Buffer.from(pdfBase64, 'base64');
     const invoiceFilename = filename || `Invoice_${Date.now()}.pdf`;
 
-    // Send PDF document first
-    await sock.sendMessage(jid, {
-      document: pdfBuffer,
-      mimetype: 'application/pdf',
-      fileName: invoiceFilename,
-    });
+    // Send PDF document first using MessageMedia (base64 string)
+    const media = new MessageMedia('application/pdf', pdfBase64, invoiceFilename);
+    await client.sendMessage(jid, media);
 
     // Send the text message
-    await sock.sendMessage(jid, { text: message });
+    await client.sendMessage(jid, message);
 
     console.log(`✅ Invoice sent to ${phone} (${invoiceFilename})`);
     res.json({ success: true, message: `Invoice sent to ${phone}` });
@@ -268,280 +209,193 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`   QR: http://localhost:${PORT}/qr`);
 });
 
-// In-memory store — persists messages for Signal session establishment
-// This is the CRITICAL piece that fixes "No sessions" for group sending
-const store = makeInMemoryStore({ logger: pino({ level: 'silent' }) });
-
 // ============================================================
-//  BAILEYS WHATSAPP CLIENT
+//  WHATSAPP CLIENT (whatsapp-web.js + Chromium)
 // ============================================================
-async function connectWhatsApp() {
-  let version = [2, 3000, 1035194821]; // Fallback version
-  try {
-    const { version: fetchedVersion } = await fetchLatestBaileysVersion();
-    version = fetchedVersion;
-    console.log(`📱 Using WhatsApp Web v${version.join('.')}`);
-  } catch (e) {
-    console.log(`📱 Using hardcoded fallback WhatsApp Web v${version.join('.')}`);
-  }
+async function initWhatsApp() {
+  // Ensure MongoDB is connected before creating MongoStore
+  await mongoose.connection.asPromise();
 
-  const { state, saveCreds } = await useMongoDBAuthState();
+  const store = new MongoStore({ mongoose });
 
-  sock = makeWASocket({
-    version,
-    auth: state,
-    logger: pino({ level: 'silent' }),
-    printQRInTerminal: true,
-    browser: Browsers.macOS('Desktop'),
-    syncFullHistory: false,
-    markOnlineOnConnect: false,
-    generateHighQualityLinkPreview: false,
-    // CRITICAL: Proper getMessage using the in-memory store
-    // Without this, Baileys can't establish Signal sessions for group sends
-    getMessage: async (key) => {
-      if (store) {
-        const msg = await store.loadMessage(key.remoteJid, key.id);
-        return msg?.message || undefined;
-      }
-      return { conversation: 'hello' };
+  client = new Client({
+    authStrategy: new RemoteAuth({
+      store,
+      backupSyncIntervalMs: 300000, // Save session every 5 min
+    }),
+    puppeteer: {
+      headless: true,
+      // Use system Chromium installed by Dockerfile (set by PUPPETEER_EXECUTABLE_PATH env)
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      // Args tuned for Render free tier (low RAM, Linux container)
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process', // Reduces RAM significantly
+        '--disable-gpu',
+      ],
     },
   });
 
-  // Bind store to socket — stores all received messages for session use
-  store.bind(sock.ev);
-
-  // ── Save credentials whenever they update ─────────────────
-  sock.ev.on('creds.update', saveCreds);
-
-  // ── Connection status ──────────────────────────────────────
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      latestQR = qr;
-      isConnected = false;
-      const renderUrl = process.env.RENDER_EXTERNAL_URL || 'YOUR_RENDER_URL';
-      console.log('\n📸 NEW QR CODE GENERATED');
-      console.log('─────────────────────────────────────────');
-      if (renderUrl !== 'YOUR_RENDER_URL') {
-        console.log(`👆 SCAN HERE → ${renderUrl}/qr`);
-      } else {
-        console.log('👆 OPEN YOUR BROWSER AND GO TO:');
-        console.log('   https://ishaanaa-whastapp-bot-attendance.onrender.com/qr');
-      }
-      console.log('─────────────────────────────────────────\n');
-    }
-
-    if (connection === 'open') {
-      isConnected = true;
-      latestQR = null;
-      console.log('\n✅ WhatsApp Business Connected!');
-      console.log('┌─────────────────────────────────────────────┐');
-      console.log('│  🌸 ISHAANAA DESIGNER STUDIO                │');
-      console.log('│     WhatsApp Business Server v2.0 — LIVE    │');
-      console.log('└─────────────────────────────────────────────┘\n');
-
-      // Pre-warm group sessions — fetches participants so Signal sessions
-      // are established before the first message is sent
-      try {
-        const groups = await sock.groupFetchAllParticipating();
-        const groupCount = Object.keys(groups).length;
-        console.log(`💬 Pre-warmed sessions for ${groupCount} group(s)`);
-      } catch (e) {
-        console.log('⚠️ Could not pre-warm group sessions:', e.message);
-      }
-
-      // Notify manager the bot is online
-      try {
-        await sock.sendMessage(MANAGER_JID, {
-          text: '🟢 *Ishaanaa Bot is LIVE*\n\nWhatsApp Business Server connected and ready.\n• Attendance tracking: ✅\n• Invoice delivery: ✅'
-        });
-      } catch (_) {}
-    }
-
-    if (connection === 'close') {
-      isConnected = false;
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const reason     = DisconnectReason[statusCode] || statusCode;
-      console.log(`⚠️ Disconnected. Reason: ${reason}`);
-      console.error('Connection close error:', lastDisconnect?.error);
-
-      // If connection was replaced by another instance (Render deploy overlap), EXIT to kill duplicate!
-      if (reason === 'connectionReplaced' || statusCode === 440) {
-        console.log('🔄 Connection replaced by another instance. Exiting to prevent loop...');
-        process.exit(1);
-      }
-      
-      // Always reconnect unless logged out
-      if (statusCode !== DisconnectReason.loggedOut) {
-        console.log('🔄 Reconnecting in 5s...');
-        setTimeout(connectWhatsApp, 5000);
-      } else {
-        console.log('🚪 Logged out. Clearing session from MongoDB...');
-        await mongoose.connection.collection('baileys_auth_keys').deleteMany({});
-        console.log('Session cleared. Please restart the server to get a new QR code.');
-      }
-    }
+  client.on('qr', qr => {
+    latestQR = qr;
+    isConnected = false;
+    const renderUrl = process.env.RENDER_EXTERNAL_URL || '';
+    console.log('\n📸 QR CODE GENERATED');
+    if (renderUrl) console.log(`👆 Scan at: ${renderUrl}/qr`);
   });
 
-  // ── Message handler ───────────────────────────────────────
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-    for (const msg of messages) {
-      if (msg.key.fromMe) continue;          // Ignore own messages
-      if (!msg.message)   continue;          // Ignore empty
-      await handleIncomingMessage(msg);
-    }
+  client.on('ready', async () => {
+    isConnected = true;
+    latestQR = null;
+    targetGroupId = null; // Reset so group is re-detected
+    console.log('\n✅ WhatsApp Business Connected!');
+    console.log('┌────────────────────────────────────────────┐');
+    console.log('│  🌸 ISHAANAA DESIGNER STUDIO                │');
+    console.log('│     WhatsApp Business Server v3.0 — LIVE  │');
+    console.log('└────────────────────────────────────────────┘\n');
   });
+
+  client.on('disconnected', reason => {
+    isConnected = false;
+    console.log('⚠️ Disconnected:', reason);
+    // Re-initialize after 10s
+    setTimeout(() => initWhatsApp(), 10000);
+  });
+
+  // Main message handler
+  client.on('message', async msg => {
+    if (msg.fromMe) return;
+    await handleIncomingMessage(msg);
+  });
+
+  await client.initialize();
 }
 
 // ============================================================
-//  MESSAGE HANDLER — Attendance Logic
+//  MESSAGE HANDLER — Attendance Logic (wwebjs)
 // ============================================================
-let targetGroupId = null; // Cache the target group ID
 
 async function handleIncomingMessage(msg) {
   try {
-    const jid      = msg.key.remoteJid;
-    const senderJid = jidNormalizedUser(msg.key.participant || jid); // Normalize to remove device ID
-    const phone    = senderJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
-    const isFromManager = senderJid === jidNormalizedUser(MANAGER_JID);
-    const isGroup  = jid.endsWith('@g.us');
+    const chat      = await msg.getChat();
+    const isGroup   = chat.isGroup;
+    const jid       = msg.from;                           // Group or personal JID
+    const senderJid = isGroup ? msg.author : msg.from;    // Real sender
+    const phone     = (senderJid || '').replace('@c.us', '').replace('@s.whatsapp.net', '');
+    const isFromManager = senderJid === MANAGER_JID;
 
-    // Extract actual message content
-    let msgContent = msg.message;
-    if (msgContent?.ephemeralMessage) msgContent = msgContent.ephemeralMessage.message;
-    if (msgContent?.viewOnceMessage) msgContent = msgContent.viewOnceMessage.message;
-    if (msgContent?.viewOnceMessageV2) msgContent = msgContent.viewOnceMessageV2.message;
-    if (msgContent?.documentWithCaptionMessage) msgContent = msgContent.documentWithCaptionMessage.message;
-
-    const text = (msgContent?.conversation || msgContent?.extendedTextMessage?.text || '').trim();
+    const text  = (msg.body || '').trim();
     const lower = text.toLowerCase();
-    const locationMsg = msgContent?.locationMessage || msgContent?.liveLocationMessage;
+    const isLocation = msg.type === MessageTypes.LOCATION;
 
-    // 1. SILENTLY ignore all DMs (except from the Manager). 
-    // Do not auto-reply so we don't spam customers.
+    // In wwebjs, sending to group JID works perfectly — no LID session issues!
+    // replyJid is simply the chat JID (group or DM)
+    const replyJid = jid;
+
+    // Allow manager DMs; allow employee DMs; ignore unknown DMs
     if (!isGroup && !isFromManager) {
-      return; 
+      const empCheck = await db.getEmployeeByPhone(phone);
+      if (!empCheck) return;
     }
 
-    // 2. ONLY allow the target group from config.js
+    // Filter to target group only
     if (isGroup) {
       if (!targetGroupId) {
-        try {
-          const meta = await sock.groupMetadata(jid);
-          const actualName = (meta.subject || '').trim();
-          const configName = (config.GROUP_NAME || '').trim();
-          console.log(`🔍 GROUP MSG: actual="${actualName}" | config="${configName}"`);
-          if (actualName.toLowerCase() === configName.toLowerCase()) {
-            targetGroupId = jid;
-            console.log(`✅ Locked to group: ${actualName} (${jid})`);
-          } else {
-            // Log and skip — check /debug endpoint to see what name WhatsApp is using
-            console.log(`⛔ SKIPPED non-target group: "${actualName}" | JID: ${jid}`);
-            console.log(`   ➡ If this is your group, update GROUP_NAME in config.js to: "${actualName}"`);
-            return;
-          }
-        } catch (e) {
-          console.log(`⚠️ Could not fetch group metadata for ${jid}: ${e.message}`);
+        const groupName = chat.name.trim();
+        const configName = (config.GROUP_NAME || '').trim();
+        console.log(`🔍 GROUP: "${groupName}" | config: "${configName}"`);
+        if (groupName.toLowerCase() === configName.toLowerCase()) {
+          targetGroupId = jid;
+          console.log(`✅ Locked to group: ${groupName} (${jid})`);
+        } else {
+          console.log(`⛔ Skipped group "${groupName}"`);
           return;
         }
       } else if (jid !== targetGroupId) {
-        return; // Ignore all other groups instantly
+        return;
       }
     }
 
-    // Debug: log only messages from the valid group or manager
-    const msgKeys = msg.message ? Object.keys(msg.message) : [];
-    console.log(`📩 Valid MSG from ${phone} | keys: [${msgKeys.join(', ')}]`);
+    const msgType = msg.type;
+    console.log(`📩 MSG from ${phone} | type: ${msgType} | ${isGroup ? 'GROUP' : 'DM'}`);
 
-    // 2. Resolve Employee (Handle @lid hidden numbers)
     let emp = await db.getEmployeeByPhone(phone);
-    
-    // If not found, and they sent a registration command:
+
+    // Register command (LID users link their name)
     if (!emp && lower.startsWith('register ')) {
       const name = text.substring(9).trim();
       const existingEmp = await db.Employee.findOne({ name: new RegExp('^' + name + '$', 'i') });
       if (existingEmp) {
-        existingEmp.phone = phone; // Update their phone to this @lid
+        existingEmp.phone = phone;
         await existingEmp.save();
-        await sendText(jid, `✅ Successfully linked your WhatsApp to *${existingEmp.name}*! You can now check-in/out.`);
+        const cfgEmp = config.EMPLOYEES.find(e => e.name.toLowerCase() === name.toLowerCase());
+        const regJid = cfgEmp ? `${cfgEmp.phone}@c.us` : null;
+        if (regJid) await sendText(regJid, `✅ Linked to *${existingEmp.name}*! Share your location to check in.`);
+        console.log(`✅ Registered LID ${phone} as ${existingEmp.name}`);
       } else {
-        await sendText(jid, `❌ Could not find employee "${name}". Ask the manager to add you to config.js.`);
+        console.log(`⚠️ Register failed: "${name}" not found in employee list`);
       }
       return;
     }
 
-    // If still not found, tell them to register
-    if (!emp && (locationMsg || lower.includes('checkin') || lower.includes('checkout') || lower.includes('logout'))) {
-      await sendText(jid, `❌ Unregistered ID. Because your phone number is hidden in this group, please reply with:\n*register YourName*\n(e.g., register Neha)`);
+    // Unregistered LID — can't reply, just log
+    if (!emp && (isLocation || lower.includes('checkin') || lower.includes('checkout'))) {
+      console.log(`⚠️ Unregistered user ${phone}. They should send: register <Name>`);
       return;
     }
 
-    // ── Location message = Check-in / Check-out ───────────────
-    if (locationMsg) {
-      // Normalize lat/lng field names (liveLocationMessage uses different keys)
-      const normalizedLocation = {
-        latitude: locationMsg.degreesLatitude || locationMsg.latitude,
-        longitude: locationMsg.degreesLongitude || locationMsg.longitude,
+    // Location = Check-in / Check-out
+    if (isLocation) {
+      const location = {
+        latitude:  msg.location.latitude,
+        longitude: msg.location.longitude,
       };
-      await handleLocation(phone, normalizedLocation, jid);
+      await handleLocation(phone, location, replyJid);
       return;
     }
 
-    // ── Text commands ─────────────────────────────────────────
     if (!text) return;
 
-    // Manager commands
     if (isFromManager) {
-      await handleManagerCommand(lower, text, jid);
+      await handleManagerCommand(lower, text, replyJid);
       return;
     }
 
-    // Employee commands
-    if (!emp) return; // Ignore unknown numbers
+    if (!emp) return;
 
     if (lower.includes('hi') || lower.includes('hello') || lower.includes('start')) {
-      await sendText(jid,
-        `👋 Hello ${emp.name}!\n\nPlease *share your live location* to check in or check out.\n\nTap the 📎 icon → Location → Share Live Location.`
-      );
+      await sendText(replyJid, `👋 Hello ${emp.name}!\n\nShare your *live location* to check in or out.\n\nTap 📎 → Location → Share Live Location.`);
       return;
     }
-
     if (lower.includes('check in') || lower.includes('checkin') || lower.includes('login')) {
-      await sendText(jid, `To check in, please *share your location* 📍\n\n(Tap the 📎 icon → Location → Send your current location).`);
+      await sendText(replyJid, `To check in, share your location 📍\n\nTap 📎 → Location → Send current location.`);
       return;
     }
-
     if (lower.includes('check out') || lower.includes('checkout') || lower.includes('logout') || lower.includes('log out')) {
-      await sendText(jid, `To check out, please *share your location* 📍\n\n(Tap the 📎 icon → Location → Send your current location).`);
+      await sendText(replyJid, `To check out, share your location 📍\n\nTap 📎 → Location → Send current location.`);
       return;
     }
-
     if (lower === 'status' || lower === 'my status') {
       const record = await db.getTodayRecord(emp._id);
       if (!record) {
-        await sendText(jid, `📋 *${emp.name}* — No attendance recorded today yet.`);
+        await sendText(replyJid, `📋 *${emp.name}* — No attendance recorded today yet.`);
       } else {
-        await sendText(jid,
-          `📋 *${emp.name}* — Today's Status\n\n` +
-          `Status: *${record.status}*\n` +
-          `Check-in:  ${record.check_in  || '—'}\n` +
-          `Check-out: ${record.check_out || '—'}\n` +
-          `Hours: ${record.hours_worked ? record.hours_worked.toFixed(1) + 'h' : '—'}`
+        await sendText(replyJid,
+          `📋 *${emp.name}* — Today\n\nStatus: *${record.status}*\nCheck-in:  ${record.check_in || '—'}\nCheck-out: ${record.check_out || '—'}\nHours: ${record.hours_worked ? record.hours_worked.toFixed(1) + 'h' : '—'}`
         );
       }
       return;
     }
-
     if (lower.startsWith('leave')) {
-      const datePart = text.split(' ').slice(1).join(' ').trim();
-      const leaveDate = datePart || dayjs().format('YYYY-MM-DD');
-      await db.requestLeave(emp._id, leaveDate, msg.key.id);
-      await sendText(jid, `✅ Leave request for *${leaveDate}* has been sent to the manager.`);
-      await sendText(MANAGER_JID,
-        `🙋 *Leave Request*\n\n*${emp.name}* has requested leave on *${leaveDate}*.\n\nReply *approve ${emp.name}* or *reject ${emp.name}*`
-      );
+      const leaveDate = text.split(' ').slice(1).join(' ').trim() || dayjs().format('YYYY-MM-DD');
+      await db.requestLeave(emp._id, leaveDate, msg.id._serialized || msg.id);
+      await sendText(replyJid, `✅ Leave request for *${leaveDate}* sent to manager.`);
+      await sendText(MANAGER_JID, `🙋 *Leave Request*\n\n*${emp.name}* → *${leaveDate}*\n\nReply: *approve ${emp.name}* or *reject ${emp.name}*`);
       return;
     }
 
@@ -551,7 +405,7 @@ async function handleIncomingMessage(msg) {
 }
 
 // ─── Location Handler ─────────────────────────────────────────
-async function handleLocation(phone, locationMsg, jid) {
+async function handleLocation(phone, locationMsg, replyJid) {
   const emp = await db.getEmployeeByPhone(phone);
   if (!emp) return;
 
@@ -568,7 +422,7 @@ async function handleLocation(phone, locationMsg, jid) {
   const isNearStudio = distanceKm <= (config.STUDIO.radius / 1000); // Convert meters to km
 
   if (!isNearStudio) {
-    await sendText(jid,
+    await sendText(replyJid,
       `📍 Location received, but you appear to be *${distanceKm.toFixed(2)} km* from the studio.\n\n` +
       `Please share your location from *within the studio* to mark attendance.`
     );
@@ -591,7 +445,7 @@ async function handleLocation(phone, locationMsg, jid) {
     }
 
     await db.checkIn(emp._id, finalTimeStr, status);
-    await sendText(jid,
+    await sendText(replyJid,
       `✅ *Check-in Recorded!*\n\n` +
       `👤 ${emp.name}\n` +
       `🕐 ${finalTimeStr} (Adjusted for today)\n` +
@@ -606,7 +460,7 @@ async function handleLocation(phone, locationMsg, jid) {
     const finalStatus = hoursWorked >= config.SHIFT.minHours ? 'Full Day' : 'Half Day';
 
     await db.checkOut(emp._id, timeStr, hoursWorked, finalStatus);
-    await sendText(jid,
+    await sendText(replyJid,
       `👋 *Check-out Recorded!*\n\n` +
       `👤 ${emp.name}\n` +
       `🕐 ${timeStr}\n` +
@@ -615,42 +469,43 @@ async function handleLocation(phone, locationMsg, jid) {
       `See you tomorrow! 🌸`
     );
   } else {
-    await sendText(jid, `✅ You're already checked out for today. See you tomorrow!`);
+    await sendText(replyJid, `✅ You're already checked out for today. See you tomorrow!`);
   }
 }
 
 // ─── Manager Commands ─────────────────────────────────────────
-async function handleManagerCommand(lower, text, jid) {
+async function handleManagerCommand(lower, text, replyJid) {
   if (lower === 'report' || lower === 'today') {
     const report = await reports.todayTextReport();
-    await sendText(jid, report);
+    await sendText(replyJid, report);
     return;
   }
 
   if (lower === 'status' || lower === 'live') {
     const statusReport = await reports.statusTextReport();
-    await sendText(jid, statusReport);
+    await sendText(replyJid, statusReport);
     return;
   }
 
   if (lower === 'excel' || lower === 'sheet') {
     try {
-      await sendText(jid, '📊 Generating Excel report for this month...');
+      await sendText(replyJid, '📊 Generating Excel report for this month...');
       const now = dayjs();
       const filepath = await reports.generateMonthlyExcel(now.year(), now.month() + 1);
       const filename = path.basename(filepath);
       
-      await sock.sendMessage(jid, {
-        document: fs.readFileSync(filepath),
-        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        fileName: filename,
-        caption: `📅 Attendance Report for ${now.format('MMMM YYYY')}`
-      });
+      const base64Data = fs.readFileSync(filepath).toString('base64');
+      const media = new MessageMedia(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        base64Data,
+        filename
+      );
+      await client.sendMessage(replyJid, media, { caption: `📅 Attendance Report for ${now.format('MMMM YYYY')}` });
       
       // Cleanup
       setTimeout(() => fs.unlink(filepath, () => {}), 2000);
     } catch (e) {
-      await sendText(jid, `❌ Error generating Excel: ${e.message}`);
+      await sendText(replyJid, `❌ Error generating Excel: ${e.message}`);
     }
     return;
   }
@@ -659,14 +514,15 @@ async function handleManagerCommand(lower, text, jid) {
     const name = text.slice(8).trim();
     const emp = await db.getEmployeeByName(name);
     if (!emp) {
-      await sendText(jid, `❌ Employee "${name}" not found.`);
+      await sendText(replyJid, `❌ Employee "${name}" not found.`);
       return;
     }
     const today = dayjs().format('YYYY-MM-DD');
     await db.requestLeave(emp._id, today, 'manager-approved-' + Date.now());
-    const empJid = '91' + emp.phone.replace(/\D/g, '').slice(-10) + '@s.whatsapp.net';
+    const cleanPhone = emp.phone.replace(/\D/g, '');
+    const empJid = (cleanPhone.length === 10 ? '91' + cleanPhone : cleanPhone) + '@c.us';
     await sendText(empJid, `✅ Your leave for *${today}* has been *approved* by the manager.`);
-    await sendText(jid, `✅ Leave approved for *${emp.name}*.`);
+    await sendText(replyJid, `✅ Leave approved for *${emp.name}*.`);
     return;
   }
 
@@ -674,17 +530,18 @@ async function handleManagerCommand(lower, text, jid) {
     const name = text.slice(7).trim();
     const emp = await db.getEmployeeByName(name);
     if (!emp) {
-      await sendText(jid, `❌ Employee "${name}" not found.`);
+      await sendText(replyJid, `❌ Employee "${name}" not found.`);
       return;
     }
-    const empJid = '91' + emp.phone.replace(/\D/g, '').slice(-10) + '@s.whatsapp.net';
+    const cleanPhone = emp.phone.replace(/\D/g, '');
+    const empJid = (cleanPhone.length === 10 ? '91' + cleanPhone : cleanPhone) + '@c.us';
     await sendText(empJid, `❌ Your leave request has been *rejected* by the manager.`);
-    await sendText(jid, `✅ Leave rejected for *${emp.name}*.`);
+    await sendText(replyJid, `✅ Leave rejected for *${emp.name}*.`);
     return;
   }
 
   if (lower === 'help') {
-    await sendText(jid,
+    await sendText(replyJid,
       `🤖 *Manager Commands*\n\n` +
       `*report* — Today's attendance summary\n` +
       `*status* — Real-time studio status\n` +
@@ -705,7 +562,7 @@ function setupSchedules() {
   schedule.scheduleJob('0 9 * * 1-6', async () => {
     const employees = await db.getAllEmployees();
     for (const emp of employees) {
-      const jid = '91' + emp.phone.replace(/\D/g, '').slice(-10) + '@s.whatsapp.net';
+      const jid = '91' + emp.phone.replace(/\D/g, '').slice(-10) + '@c.us';
       try {
         await sendText(jid, `🌅 Good morning ${emp.name}! Please share your location to mark attendance.`);
         await new Promise(r => setTimeout(r, 1000)); // 1s delay between messages
@@ -752,24 +609,17 @@ function setupSchedules() {
 // ============================================================
 //  UTILITY FUNCTIONS
 // ============================================================
-async function sendText(jid, text, retries = 4) {
-  if (!sock || !isConnected) return;
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      await sock.sendMessage(jid, { text });
-      return; // success
-    } catch (err) {
-      const isSessionErr = err.message?.toLowerCase().includes('no sessions') ||
-                           err.message?.toLowerCase().includes('session');
-      if (isSessionErr && attempt < retries) {
-        const delay = attempt * 2000; // 2s, 4s, 6s
-        console.log(`⏳ No session yet (attempt ${attempt}/${retries}), retrying in ${delay/1000}s...`);
-        await new Promise(r => setTimeout(r, delay));
-      } else {
-        console.error(`❌ Failed to send to ${jid}:`, err.message);
-        return;
-      }
-    }
+
+
+async function sendText(jid, text) {
+  if (!client || !isConnected) {
+    console.log('⚠️ Cannot send — WhatsApp not ready');
+    return;
+  }
+  try {
+    await client.sendMessage(jid, text);
+  } catch (err) {
+    console.error(`❌ Failed to send to ${jid}:`, err.message);
   }
 }
 
@@ -797,7 +647,7 @@ function isLate(time) {
 async function start() {
   console.log('┌─────────────────────────────────────────────┐');
   console.log('│  🌸 ISHAANAA DESIGNER STUDIO                │');
-  console.log('│     WhatsApp Business Server v2.0           │');
+  console.log('│     WhatsApp Business Server v3.0           │');
   console.log('└─────────────────────────────────────────────┘\n');
 
   if (!MONGODB_URI) {
@@ -818,8 +668,8 @@ async function start() {
   setupSchedules();
 
   // Start WhatsApp
-  console.log('📱 Connecting to WhatsApp Business...');
-  await connectWhatsApp();
+  console.log('📱 Starting WhatsApp Business (wwebjs + Chromium)...');
+  await initWhatsApp();
 }
 
 start().catch((err) => {
