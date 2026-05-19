@@ -584,6 +584,7 @@ async function initWhatsApp() {
 
   client = new Client({
     authStrategy: new RemoteAuth({
+      clientId: 'ishaanaa-bot',
       store,
       backupSyncIntervalMs: 300000, // Save session every 5 min
     }),
@@ -610,6 +611,18 @@ async function initWhatsApp() {
     const renderUrl = process.env.RENDER_EXTERNAL_URL || '';
     console.log('\n📸 QR CODE GENERATED');
     if (renderUrl) console.log(`👆 Scan at: ${renderUrl}/qr`);
+  });
+
+  client.on('authenticated', () => {
+    console.log('✅ Authenticated to WhatsApp! Session is valid.');
+  });
+
+  client.on('auth_failure', msg => {
+    console.error('❌ Authentication failure:', msg);
+  });
+
+  client.on('remote_session_saved', () => {
+    console.log('💾 Remote session successfully saved to MongoDB!');
   });
 
   client.on('ready', async () => {
