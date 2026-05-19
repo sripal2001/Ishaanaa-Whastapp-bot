@@ -712,44 +712,47 @@ async function handleLocation(phone, locationMsg, replyJid) {
   // Check if already checked in today
   const record = await db.getTodayRecord(emp._id);
 
-  if (!record) {
+  if (!record || !record.check_in) {
     // ── Check IN ─────────────────────────────────────────────
-    // ONE-TIME FIX FOR TODAY (May 18): Backdate to 11:00 AM
-    const todayStr = dayjs().format('YYYY-MM-DD');
-    let finalTimeStr = timeStr;
-    let status = isLate(now) ? 'Late' : 'Present';
-
-    if (todayStr === '2026-05-18') {
-      finalTimeStr = '11:00 AM';
-      status = 'Present';
-    }
-
-    await db.checkIn(emp._id, finalTimeStr, status);
+    const status = isLate(now) ? 'Late' : 'Present';
+    await db.checkIn(emp._id, timeStr, status);
     await sendText(replyJid,
       `✅ *Check-in Recorded!*\n\n` +
       `👤 ${emp.name}\n` +
-      `🕐 ${finalTimeStr} (Adjusted for today)\n` +
-      `📌 ${distanceKm.toFixed(0)}m from studio\n` +
+      `🕐 ${timeStr}\n` +
+      `📌 ~${Math.round(distanceKm * 1000)}m from studio\n` +
       `Status: *${status}*\n\n` +
-      `Share location again to check out.`
+      `Share your location again when you leave to check out. 👋`
     );
   } else if (!record.check_out) {
     // ── Check OUT ────────────────────────────────────────────
-    const checkInTime = dayjs(`${dayjs().format('YYYY-MM-DD')} ${record.check_in}`, 'YYYY-MM-DD hh:mm A');
-    const hoursWorked = now.diff(checkInTime, 'minute') / 60;
+    // Parse check-in time robustly — try 12h then 24h format
+    let checkInTime = dayjs(`${dayjs().format('YYYY-MM-DD')} ${record.check_in}`, 'YYYY-MM-DD hh:mm A', true);
+    if (!checkInTime.isValid()) {
+      checkInTime = dayjs(`${dayjs().format('YYYY-MM-DD')} ${record.check_in}`, 'YYYY-MM-DD HH:mm', true);
+    }
+    if (!checkInTime.isValid()) {
+      checkInTime = dayjs(); // fallback: treat as 0 hours worked
+    }
+    const minutesWorked = now.diff(checkInTime, 'minute');
+    const hoursWorked = minutesWorked / 60;
     const finalStatus = hoursWorked >= config.SHIFT.minHours ? 'Full Day' : 'Half Day';
 
-    await db.checkOut(emp._id, timeStr, hoursWorked, finalStatus);
+    await db.checkOut(emp._id, timeStr, parseFloat(hoursWorked.toFixed(2)), finalStatus);
     await sendText(replyJid,
       `👋 *Check-out Recorded!*\n\n` +
       `👤 ${emp.name}\n` +
-      `🕐 ${timeStr}\n` +
+      `🕑 In: ${record.check_in}  →  Out: ${timeStr}\n` +
       `⏱ Hours worked: *${hoursWorked.toFixed(1)}h*\n` +
+      `📌 ~${Math.round(distanceKm * 1000)}m from studio\n` +
       `Status: *${finalStatus}*\n\n` +
-      `See you tomorrow! 🌸`
+      `Great work today! See you tomorrow 🌸`
     );
   } else {
-    await sendText(replyJid, `✅ You're already checked out for today. See you tomorrow!`);
+    // Already fully checked out
+    await sendText(replyJid,
+      `✅ *${emp.name}*, you already checked out at *${record.check_out}* today.\n\nSee you tomorrow! 🌸`
+    );
   }
 }
 
@@ -946,7 +949,7 @@ async function start() {
     setupSchedules();
 
     // Start WhatsApp
-    console.log('📱 Starting WhatsApp Business (wwebjs + Chromium)...');
+    console.log('📱 Starting WhatsApp Business (Baileys — lightweight)...');
     await initWhatsApp();
   } catch (err) {
     startupError = err;
