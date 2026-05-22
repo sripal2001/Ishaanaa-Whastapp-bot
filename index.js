@@ -390,6 +390,11 @@ app.get('/qr', (req, res) => {
   if (isConnected) {
     return res.send('<h2 style="font-family:sans-serif;color:green">✅ WhatsApp is Connected! No QR needed.</h2>');
   }
+  
+  if (!client) {
+    console.log('User visited /qr. Forcing socket start to generate QR...');
+    initWhatsApp({ forceStart: true }).catch(e => console.error(e));
+  }
   res.send(`<!DOCTYPE html>
 <html>
 <head>
@@ -451,13 +456,17 @@ app.get('/debug', async (req, res) => {
 app.get('/logout', async (req, res) => {
   try {
     if (client) {
-      client.logout();
+      try { client.logout(); } catch(e) {}
       client = null;
     }
+    // Wipe MongoDB Auth State
+    try { await mongoose.model('AuthKey').deleteMany({}); } catch(e) {}
+    
+    // Legacy cleanup just in case
     if (fs.existsSync('auth_info_baileys')) {
       fs.rmSync('auth_info_baileys', { recursive: true, force: true });
     }
-    res.send('<h2 style="color:green">✅ WhatsApp Session Cleared!</h2><p>Please wait 10 seconds and go to <a href="/qr">/qr</a> to scan again.</p>');
+    res.send('<h2 style="color:green">✅ WhatsApp Session Cleared!</h2><p>Please wait 10 seconds and go to <a href="/pair">/pair</a> to link again.</p>');
     setTimeout(() => { process.exit(0); }, 3000);
   } catch (err) {
     res.status(500).send('❌ Error clearing session: ' + err.message);
@@ -509,7 +518,7 @@ h1{color:#25D366;}.code{font-size:3rem;font-weight:bold;letter-spacing:8px;color
 </body></html>`);
 
     // Start WhatsApp with the phone number — generates the code
-    initWhatsApp(phone).catch(e => console.error('Pair init error:', e.message));
+    initWhatsApp({ pairingPhone: phone }).catch(e => console.error('Pair init error:', e.message));
   } catch (err) {
     console.error('❌ Pair route error:', err.message);
   }
@@ -594,7 +603,10 @@ app.listen(PORT, '0.0.0.0', () => {
 // ============================================================
 //  WHATSAPP CLIENT (Baileys — lightweight, no Chromium)
 // ============================================================
-async function initWhatsApp(pairingPhone = null) {
+async function initWhatsApp(options = {}) {
+  const pairingPhone = options.pairingPhone || null;
+  const forceStart = options.forceStart || false;
+
   await mongoose.connection.asPromise();
 
   console.log('🔐 Loading auth state from MongoDB...');
@@ -604,8 +616,8 @@ async function initWhatsApp(pairingPhone = null) {
 
   const hasSession = !!(state.creds && state.creds.me);
 
-  // If no session and no pairing phone, do NOT auto-connect — just wait
-  if (!hasSession && !pairingPhone) {
+  // If no session, no pairing phone, and not forced, do NOT auto-connect — just wait
+  if (!hasSession && !pairingPhone && !forceStart) {
     console.log('⚠️ No WhatsApp session found.');
     console.log(`👉 Visit /pair to link your WhatsApp account.`);
     client = null;
