@@ -521,6 +521,19 @@ app.get('/pair-status', async (req, res) => {
     return res.send('<h2 style="color:green;font-family:sans-serif">✅ WhatsApp Connected! Bot is live.</h2>');
   }
   if (latestPairCode) {
+    if (latestPairCode.startsWith('ERROR:')) {
+      return res.send(`<!DOCTYPE html>
+<html><head><title>Pairing Error</title>
+<style>body{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;background:#111;color:#eee;margin:0;}
+h1{color:#ff4444;}.code{font-size:1.5rem;font-weight:bold;color:#ff4444;background:#2a1111;padding:24px 40px;border-radius:12px;border:2px solid #ff4444;margin:20px;max-width:600px;}</style>
+</head><body>
+<h1>❌ Pairing Failed</h1>
+<div class='code'>${latestPairCode}</div>
+<p style='color:#888'>WhatsApp rejected the pairing request. This might be due to rate-limiting or connection issues.</p>
+<p><a href='/pair' style='color:#25D366'>Try Again</a></p>
+</body></html>`);
+    }
+
     return res.send(`<!DOCTYPE html>
 <html><head><title>Pairing Code</title>
 <style>body{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;background:#111;color:#eee;margin:0;}
@@ -607,7 +620,7 @@ async function initWhatsApp(pairingPhone = null) {
     keepAliveIntervalMs: 30000,
   });
 
-  // If pairing phone provided, request code immediately after socket is ready
+// If pairing phone provided, request code immediately after socket is ready
   if (pairingPhone && !hasSession) {
     // Wait until socket is ready to request pairing code
     setTimeout(async () => {
@@ -619,7 +632,7 @@ async function initWhatsApp(pairingPhone = null) {
       } catch (e) {
         console.error('❌ requestPairingCode failed:', e.message);
         // If it fails, maybe clear state and try again
-        latestPairCode = 'ERROR';
+        latestPairCode = `ERROR: ${e.message}`;
       }
     }, 3000);
   }
