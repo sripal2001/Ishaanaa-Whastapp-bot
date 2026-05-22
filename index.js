@@ -614,7 +614,7 @@ async function initWhatsApp(pairingPhone = null) {
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
-    browser: Browsers.ubuntu('Chrome'),
+    browser: Browsers.macOS('Desktop'),
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 30000,
@@ -625,16 +625,18 @@ async function initWhatsApp(pairingPhone = null) {
     // Wait until socket is ready to request pairing code
     setTimeout(async () => {
       try {
+        if (!client) {
+           throw new Error('Socket was closed by WhatsApp (probably Rate Limit 405) before code could be requested.');
+        }
         console.log('🔄 Requesting pairing code from WhatsApp servers...');
         const code = await client.requestPairingCode(pairingPhone.replace(/\D/g, ''));
         latestPairCode = code;
         console.log(`🔑 Pairing code generated: ${code}`);
       } catch (e) {
         console.error('❌ requestPairingCode failed:', e.message);
-        // If it fails, maybe clear state and try again
         latestPairCode = `ERROR: ${e.message}`;
       }
-    }, 3000);
+    }, 2000); // reduced to 2s
   }
 
   client.ev.on('creds.update', saveCreds);
