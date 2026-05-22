@@ -46,7 +46,8 @@ process.on('unhandledRejection', (r)   => {
 });
 
 // ─── Imports ───────────────────────────────────────────────────────────
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
+const { useMongoDBAuthState } = require('./baileys-auth-mongo');
 const pino = require('pino');
 const QRCode      = require('qrcode');
 const express     = require('express');
@@ -511,56 +512,73 @@ app.listen(PORT, '0.0.0.0', () => {
 //  WHATSAPP CLIENT (whatsapp-web.js + Chromium)
 // ============================================================
 async function initWhatsApp() {
+  // Wait for MongoDB to be ready before reading auth state
   await mongoose.connection.asPromise();
 
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+  console.log('🔐 Loading auth state from MongoDB...');
+  const { state, saveCreds } = await useMongoDBAuthState();
 
   client = makeWASocket({
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
     browser: Browsers.macOS('Desktop'),
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
+    keepAliveIntervalMs: 25000,
   });
 
   client.ev.on('creds.update', saveCreds);
 
-  client.ev.on('connection.update', (update) => {
+  client.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
       latestQR = qr;
       isConnected = false;
       const renderUrl = process.env.RENDER_EXTERNAL_URL || '';
-      console.log('\\n📸 QR CODE GENERATED');
+      console.log('\n📸 QR CODE GENERATED — scan to connect');
       if (renderUrl) console.log(`👆 Scan at: ${renderUrl}/qr`);
     }
 
     if (connection === 'close') {
       isConnected = false;
-      const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log('⚠️ Disconnected:', lastDisconnect.error?.message);
-      if (shouldReconnect) {
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const reason = lastDisconnect?.error?.message || 'Unknown';
+      console.log(`⚠️ Disconnected (${statusCode}): ${reason}`);
+
+      if (statusCode === DisconnectReason.loggedOut) {
+        // Logged out — clear DB auth so QR is shown fresh
+        console.log('❌ Logged out. Clearing MongoDB session...');
+        try { await mongoose.model('AuthKey').deleteMany({}); } catch(e) {}
+        setTimeout(initWhatsApp, 3000);
+      } else if (statusCode === 428 || statusCode === 408 || statusCode === 503 || !statusCode) {
+        // Connection closed / timeout — reconnect quickly
+        console.log('🔄 Reconnecting in 5s...');
         setTimeout(initWhatsApp, 5000);
       } else {
-        console.log('❌ Logged out. Deleting session to start fresh.');
-        try { fs.rmSync('auth_info_baileys', { recursive: true, force: true }); } catch(e) {}
-        setTimeout(initWhatsApp, 5000);
+        // Other error — reconnect with longer delay
+        console.log(`🔄 Reconnecting in 10s (code ${statusCode})...`);
+        setTimeout(initWhatsApp, 10000);
       }
     } else if (connection === 'open') {
       isConnected = true;
       latestQR = null;
-      targetGroupId = null;
-      console.log('\\n✅ WhatsApp Business Connected (Baileys)!');
+      console.log('\n✅ WhatsApp Business Connected (Baileys + MongoDB Auth)!');
     }
   });
 
   client.ev.on('messages.upsert', async (m) => {
     if (m.type !== 'notify') return;
-    const msg = m.messages[0];
-    if (!msg.message) return;
-    if (msg.key.fromMe) return;
-
-    await handleIncomingMessage(msg);
+    for (const msg of m.messages) {
+      if (!msg.message) continue;
+      if (msg.key.fromMe) continue;
+      try {
+        await handleIncomingMessage(msg);
+      } catch (e) {
+        console.error('❌ Handler error:', e.message);
+      }
+    }
   });
 }
 
@@ -601,7 +619,7 @@ async function handleIncomingMessage(msg) {
       }
     }
 
-    const msgType = msg.type;
+    const msgType = Object.keys(msg.message || {})[0] || 'unknown';
     console.log(`📩 MSG from ${phone} | type: ${msgType} | ${isGroup ? 'GROUP' : 'DM'}`);
 
     let emp = await db.getEmployeeByPhone(phone);
@@ -699,18 +717,20 @@ async function handleLocation(phone, locationMsg, replyJid) {
     config.STUDIO.lat, config.STUDIO.lng
   );
 
-  const isNearStudio = distanceKm <= (config.STUDIO.radius / 1000); // Convert meters to km
-
-  if (!isNearStudio) {
-    await sendText(replyJid,
-      `📍 Location received, but you appear to be *${distanceKm.toFixed(2)} km* from the studio.\n\n` +
-      `Please share your location from *within the studio* to mark attendance.`
-    );
-    return;
-  }
+  const isNearStudio = distanceKm <= (config.STUDIO.radius / 1000);
 
   // Check if already checked in today
   const record = await db.getTodayRecord(emp._id);
+  const alreadyCheckedIn = record && record.check_in;
+
+  // Only enforce proximity for CHECK-IN (not checkout — they may be leaving from home)
+  if (!alreadyCheckedIn && !isNearStudio) {
+    await sendText(replyJid,
+      `📍 Location received, but you appear to be *${(distanceKm * 1000).toFixed(0)}m* from the studio.\n\n` +
+      `Please share your location from *within the studio* to check in.`
+    );
+    return;
+  }
 
   if (!record || !record.check_in) {
     // ── Check IN ─────────────────────────────────────────────

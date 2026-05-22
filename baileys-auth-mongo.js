@@ -90,4 +90,4 @@ async function useMongoDBAuthState() {
   };
 }
 
-module.exports = { useMongoDBAuthState };
+module.exports = { useMongoDBAuthState, AuthKey };
