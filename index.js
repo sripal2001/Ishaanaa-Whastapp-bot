@@ -547,17 +547,22 @@ async function initWhatsApp() {
       const reason = lastDisconnect?.error?.message || 'Unknown';
       console.log(`⚠️ Disconnected (${statusCode}): ${reason}`);
 
-      if (statusCode === DisconnectReason.loggedOut) {
-        // Logged out — clear DB auth so QR is shown fresh
-        console.log('❌ Logged out. Clearing MongoDB session...');
+      if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+        // Explicitly logged out — clear session, show QR
+        console.log('❌ Logged out. Clearing MongoDB session for fresh QR...');
+        try { await mongoose.model('AuthKey').deleteMany({}); } catch(e) {}
+        setTimeout(initWhatsApp, 3000);
+      } else if (statusCode === 405) {
+        // 405 = bad/missing credentials — clear auth and show QR
+        console.log('🔑 No valid session (405). Clearing auth for fresh QR scan...');
         try { await mongoose.model('AuthKey').deleteMany({}); } catch(e) {}
         setTimeout(initWhatsApp, 3000);
       } else if (statusCode === 428 || statusCode === 408 || statusCode === 503 || !statusCode) {
-        // Connection closed / timeout — reconnect quickly
+        // Connection closed / timeout — just reconnect (session is still valid)
         console.log('🔄 Reconnecting in 5s...');
         setTimeout(initWhatsApp, 5000);
       } else {
-        // Other error — reconnect with longer delay
+        // Unknown error — reconnect with longer delay
         console.log(`🔄 Reconnecting in 10s (code ${statusCode})...`);
         setTimeout(initWhatsApp, 10000);
       }
