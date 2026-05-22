@@ -613,11 +613,14 @@ async function initWhatsApp(pairingPhone = null) {
   client = makeWASocket({
     auth: state,
     printQRInTerminal: false,
-    logger: pino({ level: 'silent' }),
+    logger: pino({ level: 'info' }),
     browser: Browsers.macOS('Desktop'),
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 30000,
+    syncFullHistory: false,
+    markOnlineOnConnect: false,
+    generateHighQualityLinkPreview: false,
   });
 
 // If pairing phone provided, request code immediately after socket is ready
@@ -1037,8 +1040,32 @@ function setupSchedules() {
   console.log('📅 Schedules set: 9:00 AM reminders, 1:00 PM auto-absent, 9:30 PM report');
 }
 
+// ── IN-MEMORY LOGGING (for remote debugging) ─────────────────
+const logs = [];
+const maxLogs = 200;
+const origLog = console.log;
+const origErr = console.error;
+
+console.log = function(...args) {
+  const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ');
+  logs.push(`[LOG] ${new Date().toISOString()}: ${msg}`);
+  if (logs.length > maxLogs) logs.shift();
+  origLog.apply(console, args);
+};
+console.error = function(...args) {
+  const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ');
+  logs.push(`[ERR] ${new Date().toISOString()}: ${msg}`);
+  if (logs.length > maxLogs) logs.shift();
+  origErr.apply(console, args);
+};
+
+app.get('/logs', (req, res) => {
+  res.send(`<pre style="background:#111;color:#0f0;padding:20px;min-height:100vh;">${logs.join('\n')}</pre>`);
+});
+// ─────────────────────────────────────────────────────────────
+
 // ============================================================
-//  UTILITY FUNCTIONS
+//  MONGODB CONNECTION
 // ============================================================
 
 
