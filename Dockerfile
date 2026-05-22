@@ -1,24 +1,27 @@
-FROM node:18-slim
+FROM node:20-bullseye-slim
 
+# Install Chromium and dependencies
 RUN apt-get update && apt-get install -y \
     chromium \
-    ca-certificates \
-    fonts-liberation \
+    fonts-ipafont-gothic fonts-wqy-zenhei fonts-thai-tlwg fonts-kacst fonts-freefont-ttf libxss1 \
+    --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
-WORKDIR /usr/src/app
+# Set Puppeteer to use the installed Chromium
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Set Puppeteer environment variables
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+WORKDIR /app
 
-# Copy package files and install
+# Copy package.json and install dependencies
 COPY package*.json ./
-RUN npm install
+RUN npm ci
 
-# Copy application code
+# Copy the rest of the application
 COPY . .
 
-# Start the application
-CMD [ "node", "index.js" ]
+# Hugging Face Spaces default port
+ENV PORT=7860
+EXPOSE 7860
+
+CMD ["npm", "start"]
