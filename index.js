@@ -488,8 +488,15 @@ button{padding:12px 24px;background:#25D366;color:#fff;border:none;border-radius
     return res.send('<h2 style="color:green">✅ Already connected! No pairing needed.</h2>');
   }
 
-  // Start a fresh socket for pairing (stops any existing reconnect loops)
+// Start a fresh socket for pairing (stops any existing reconnect loops)
   try {
+    // Clear the DB to ensure a completely fresh start and no rate-limit inheritance
+    try { await mongoose.model('AuthKey').deleteMany({}); } catch(e) {}
+    if (client) {
+      client.ws.close();
+      client = null;
+    }
+
     res.send(`<!DOCTYPE html>
 <html><head><title>Pairing — Please Wait</title>
 <style>body{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;background:#111;color:#eee;margin:0;}
@@ -602,15 +609,19 @@ async function initWhatsApp(pairingPhone = null) {
 
   // If pairing phone provided, request code immediately after socket is ready
   if (pairingPhone && !hasSession) {
-    // Give the socket a moment to establish the WebSocket connection
-    await new Promise(r => setTimeout(r, 3000));
-    try {
-      const code = await client.requestPairingCode(pairingPhone.replace(/\D/g, ''));
-      latestPairCode = code;
-      console.log(`🔑 Pairing code: ${code}`);
-    } catch (e) {
-      console.error('❌ requestPairingCode failed:', e.message);
-    }
+    // Wait until socket is ready to request pairing code
+    setTimeout(async () => {
+      try {
+        console.log('🔄 Requesting pairing code from WhatsApp servers...');
+        const code = await client.requestPairingCode(pairingPhone.replace(/\D/g, ''));
+        latestPairCode = code;
+        console.log(`🔑 Pairing code generated: ${code}`);
+      } catch (e) {
+        console.error('❌ requestPairingCode failed:', e.message);
+        // If it fails, maybe clear state and try again
+        latestPairCode = 'ERROR';
+      }
+    }, 3000);
   }
 
   client.ev.on('creds.update', saveCreds);
