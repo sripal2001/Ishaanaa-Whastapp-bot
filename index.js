@@ -46,7 +46,7 @@ process.on('unhandledRejection', (r)   => {
 });
 
 // ─── Imports ───────────────────────────────────────────────────────────
-const { default: makeWASocket, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, Browsers, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const { useMongoDBAuthState } = require('./baileys-auth-mongo');
 const pino = require('pino');
 const QRCode      = require('qrcode');
@@ -599,6 +599,8 @@ async function initWhatsApp(pairingPhone = null) {
 
   console.log('🔐 Loading auth state from MongoDB...');
   const { state, saveCreds } = await useMongoDBAuthState();
+  const { version, isLatest } = await fetchLatestBaileysVersion();
+  console.log(`📡 Using WA Web Version: ${version.join('.')} (isLatest: ${isLatest})`);
 
   const hasSession = !!(state.creds && state.creds.me);
 
@@ -611,6 +613,7 @@ async function initWhatsApp(pairingPhone = null) {
   }
 
   client = makeWASocket({
+    version,
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: 'info' }),
