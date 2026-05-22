@@ -467,14 +467,16 @@ app.get('/logout', async (req, res) => {
 // ── Pairing Code API ─────────────────────────────────────────
 app.get('/pair', async (req, res) => {
   const phone = req.query.phone;
+
   if (!phone) {
     return res.send(`<!DOCTYPE html>
 <html><head><title>Pair WhatsApp</title>
 <style>body{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;background:#111;color:#eee;margin:0;}
-h1{color:#25D366;}input{padding:12px;font-size:1rem;border-radius:8px;border:none;width:260px;margin:10px;}button{padding:12px 24px;background:#25D366;color:#fff;border:none;border-radius:8px;font-size:1rem;cursor:pointer;}</style>
+h1{color:#25D366;}input{padding:12px;font-size:1rem;border-radius:8px;border:none;width:260px;margin:10px;}
+button{padding:12px 24px;background:#25D366;color:#fff;border:none;border-radius:8px;font-size:1rem;cursor:pointer;}</style>
 </head><body>
 <h1>🌸 Link WhatsApp</h1>
-<p>Enter the WhatsApp number of the account to link (with country code)</p>
+<p>Enter your WhatsApp number <strong>with country code</strong> (no + or spaces)</p>
 <form action='/pair' method='get'>
   <input name='phone' placeholder='919398285972' required />
   <br/><button type='submit'>Get Pairing Code</button>
@@ -482,38 +484,51 @@ h1{color:#25D366;}input{padding:12px;font-size:1rem;border-radius:8px;border:non
 </body></html>`);
   }
 
-  if (!client || !isConnected === false) {
-    // wait up to 15s for client to initialize
-    let waited = 0;
-    while (!client && waited < 15000) {
-      await new Promise(r => setTimeout(r, 500));
-      waited += 500;
-    }
+  if (isConnected) {
+    return res.send('<h2 style="color:green">✅ Already connected! No pairing needed.</h2>');
   }
 
-  if (!client) return res.status(503).send('<h2 style="color:red">❌ Bot not initialized yet. Try again in 30 seconds.</h2>');
-  if (isConnected) return res.send('<h2 style="color:green">✅ Already connected! No pairing needed.</h2>');
-
+  // Start a fresh socket for pairing (stops any existing reconnect loops)
   try {
-    const code = await client.requestPairingCode(phone.replace(/\D/g, ''));
-    latestPairCode = code;
-    console.log(`🔑 Pairing code for ${phone}: ${code}`);
     res.send(`<!DOCTYPE html>
+<html><head><title>Pairing — Please Wait</title>
+<style>body{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;background:#111;color:#eee;margin:0;}
+h1{color:#25D366;}.code{font-size:3rem;font-weight:bold;letter-spacing:8px;color:#25D366;background:#1a1a1a;padding:24px 40px;border-radius:12px;border:2px solid #25D366;margin:20px;}p{color:#aaa;}</style>
+<meta http-equiv="refresh" content="8;url=/pair-status">
+</head><body>
+<h1>🌸 Generating Pairing Code...</h1>
+<p>Please wait ~8 seconds. You will be redirected to see your code.</p>
+<p style="color:#888">Phone: ${phone}</p>
+</body></html>`);
+
+    // Start WhatsApp with the phone number — generates the code
+    initWhatsApp(phone).catch(e => console.error('Pair init error:', e.message));
+  } catch (err) {
+    console.error('❌ Pair route error:', err.message);
+  }
+});
+
+// ── Pairing Status (shows the code after 8s) ─────────────────
+app.get('/pair-status', async (req, res) => {
+  if (isConnected) {
+    return res.send('<h2 style="color:green;font-family:sans-serif">✅ WhatsApp Connected! Bot is live.</h2>');
+  }
+  if (latestPairCode) {
+    return res.send(`<!DOCTYPE html>
 <html><head><title>Pairing Code</title>
 <style>body{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;background:#111;color:#eee;margin:0;}
 h1{color:#25D366;}.code{font-size:3rem;font-weight:bold;letter-spacing:8px;color:#25D366;background:#1a1a1a;padding:24px 40px;border-radius:12px;border:2px solid #25D366;margin:20px;}p{color:#aaa;}</style>
 </head><body>
 <h1>🌸 WhatsApp Pairing Code</h1>
-<p>Open WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number</p>
+<p>Open WhatsApp → <strong>Settings → Linked Devices → Link a Device → Link with phone number</strong></p>
 <p>Enter this code:</p>
-<div class='code'>${code}</div>
-<p style='color:#888'>This code expires in ~60 seconds. <a href='/pair?phone=${phone}' style='color:#25D366'>Get new code</a></p>
+<div class='code'>${latestPairCode}</div>
+<p style='color:#888'>Code expires in ~60 seconds. <a href='/pair' style='color:#25D366'>Start over</a> if expired.</p>
 </body></html>`);
-  } catch (err) {
-    console.error('❌ Pairing code error:', err.message);
-    res.status(500).send(`<h2 style='color:red'>❌ Error: ${err.message}</h2><p><a href='/pair' style='color:#25D366'>Try again</a></p>`);
   }
+  res.send('<h2 style="font-family:sans-serif;color:orange">⏳ Still generating code... <a href="/pair-status" style="color:#25D366">Refresh</a></h2>');
 });
+
 
 // ── POS Invoice API ───────────────────────────────────────────
 app.post('/api/send-invoice', async (req, res) => {
@@ -559,24 +574,20 @@ app.listen(PORT, '0.0.0.0', () => {
 // ============================================================
 //  WHATSAPP CLIENT (Baileys — lightweight, no Chromium)
 // ============================================================
-async function initWhatsApp() {
-  // Wait for MongoDB to be ready
+async function initWhatsApp(pairingPhone = null) {
   await mongoose.connection.asPromise();
-
-  reconnectAttempts++;
-  const delay = Math.min(5000 * reconnectAttempts, 60000); // exponential backoff, max 60s
-  if (reconnectAttempts > 1) {
-    console.log(`⏳ Waiting ${delay / 1000}s before reconnecting (attempt ${reconnectAttempts})...`);
-    await new Promise(r => setTimeout(r, delay));
-  }
 
   console.log('🔐 Loading auth state from MongoDB...');
   const { state, saveCreds } = await useMongoDBAuthState();
 
-  // Check if we have existing credentials
-  const hasCredentials = state.creds && state.creds.me;
-  if (!hasCredentials) {
-    console.log('ℹ️ No saved session found. Will generate QR or use /pair endpoint.');
+  const hasSession = !!(state.creds && state.creds.me);
+
+  // If no session and no pairing phone, do NOT auto-connect — just wait
+  if (!hasSession && !pairingPhone) {
+    console.log('⚠️ No WhatsApp session found.');
+    console.log(`👉 Visit /pair to link your WhatsApp account.`);
+    client = null;
+    return;
   }
 
   client = makeWASocket({
@@ -587,8 +598,20 @@ async function initWhatsApp() {
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 30000,
-    retryRequestDelayMs: 2000,
   });
+
+  // If pairing phone provided, request code immediately after socket is ready
+  if (pairingPhone && !hasSession) {
+    // Give the socket a moment to establish the WebSocket connection
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      const code = await client.requestPairingCode(pairingPhone.replace(/\D/g, ''));
+      latestPairCode = code;
+      console.log(`🔑 Pairing code: ${code}`);
+    } catch (e) {
+      console.error('❌ requestPairingCode failed:', e.message);
+    }
+  }
 
   client.ev.on('creds.update', saveCreds);
 
@@ -598,11 +621,12 @@ async function initWhatsApp() {
     if (qr) {
       latestQR = qr;
       isConnected = false;
-      reconnectAttempts = 0; // Reset backoff — QR means connection is progressing
       const renderUrl = process.env.RENDER_EXTERNAL_URL || '';
       console.log('\n📸 QR CODE GENERATED — scan to connect');
-      if (renderUrl) console.log(`👆 Scan at: ${renderUrl}/qr`);
-      console.log(`🔗 Or use pairing code: ${renderUrl}/pair`);
+      if (renderUrl) {
+        console.log(`👆 QR: ${renderUrl}/qr`);
+        console.log(`🔗 Pair: ${renderUrl}/pair`);
+      }
     }
 
     if (connection === 'close') {
@@ -612,27 +636,36 @@ async function initWhatsApp() {
       console.log(`⚠️ Disconnected (${statusCode}): ${reason}`);
 
       if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-        console.log('❌ Logged out. Clearing MongoDB session...');
+        console.log('❌ Logged out. Clearing session — visit /pair to re-link.');
         try { await mongoose.model('AuthKey').deleteMany({}); } catch(e) {}
-        reconnectAttempts = 0;
-        setTimeout(initWhatsApp, 3000);
+        client = null;
+        // Don't auto-reconnect — wait for user to visit /pair
       } else if (statusCode === 405) {
-        // 405 = WhatsApp rejecting connection (rate-limited or bad session)
-        // Don't clear auth — just wait longer to avoid rate-limit ban
-        console.log('🔑 Connection rejected (405). Will retry with backoff — go to /pair to link.');
-        setTimeout(initWhatsApp, delay);
+        // 405 from WhatsApp = connection rejected
+        // If we had a valid session, try once more after a long wait
+        if (hasSession) {
+          console.log('🔄 Session exists but was rejected (405). Retrying in 60s...');
+          setTimeout(() => initWhatsApp(), 60000);
+        } else {
+          console.log('⛔ No session + 405. Stopping. Visit /pair to link.');
+          client = null;
+        }
       } else if (statusCode === 428 || statusCode === 408 || !statusCode) {
-        // Timeout / stream closed — reconnect normally
-        console.log('🔄 Stream closed. Reconnecting...');
-        setTimeout(initWhatsApp, 5000);
+        if (hasSession) {
+          console.log('🔄 Stream closed. Reconnecting in 5s...');
+          setTimeout(() => initWhatsApp(), 5000);
+        }
       } else {
-        console.log(`🔄 Reconnecting (code ${statusCode})...`);
-        setTimeout(initWhatsApp, 10000);
+        if (hasSession) {
+          console.log(`🔄 Reconnecting in 15s (code ${statusCode})...`);
+          setTimeout(() => initWhatsApp(), 15000);
+        }
       }
     } else if (connection === 'open') {
       isConnected = true;
       latestQR = null;
-      reconnectAttempts = 0; // Reset on successful connection
+      latestPairCode = null;
+      reconnectAttempts = 0;
       console.log('\n✅ WhatsApp Business Connected (Baileys + MongoDB Auth)!');
     }
   });
