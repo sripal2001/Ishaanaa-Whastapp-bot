@@ -628,7 +628,7 @@ async function initWhatsApp(options = {}) {
     version,
     auth: state,
     printQRInTerminal: false,
-    logger: pino({ level: 'info' }),
+    logger: pino({ level: 'silent' }),
     browser: Browsers.macOS('Desktop'),
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,

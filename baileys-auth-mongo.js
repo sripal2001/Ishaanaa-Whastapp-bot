@@ -70,17 +70,15 @@ async function useMongoDBAuthState() {
           return data;
         },
         set: async (data) => {
-          const tasks = [];
           for (const [type, ids] of Object.entries(data)) {
             for (const [id, value] of Object.entries(ids)) {
               if (value) {
-                tasks.push(writeData(`${type}-${id}`, value));
+                await writeData(`${type}-${id}`, value);
               } else {
-                tasks.push(removeData(`${type}-${id}`));
+                await removeData(`${type}-${id}`);
               }
             }
           }
-          await Promise.all(tasks);
         },
       },
     },
