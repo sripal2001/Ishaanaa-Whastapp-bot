@@ -150,12 +150,20 @@ app.get('/debug', async (req, res) => {
 app.get('/logout', async (req, res) => {
   try {
     if (client) {
-      await client.logout();
+      try { await client.logout(); } catch(e) {}
+      try { await client.destroy(); } catch(e) {}
       client = null;
     }
     // Delete session from DB
     await mongoose.connection.collection('remote_auth_sessions').deleteMany({});
-    res.send('<h2 style="color:green">✅ WhatsApp Session Cleared!</h2><p>Please restart the server on Render, or wait 10 seconds and go to <a href="/qr">/qr</a> to scan again.</p>');
+    
+    // Delete local corrupted session folder
+    const authPath = path.resolve(__dirname, '.wwebjs_auth');
+    if (fs.existsSync(authPath)) {
+      fs.rmSync(authPath, { recursive: true, force: true });
+    }
+
+    res.send('<h2 style="color:green">✅ WhatsApp Session Completely Cleared!</h2><p>Please wait 10 seconds and go to <a href="/qr">/qr</a> to scan again.</p>');
     
     // Force exit to restart container and start fresh
     setTimeout(() => { process.exit(0); }, 3000);
@@ -216,15 +224,25 @@ async function initWhatsApp() {
   // Ensure MongoDB is connected before creating MongoStore
   await mongoose.connection.asPromise();
 
+  // Ensure auth folder exists
+  const authPath = path.resolve(__dirname, '.wwebjs_auth');
+  if (!fs.existsSync(authPath)) {
+    fs.mkdirSync(authPath, { recursive: true });
+  }
+
   const store = new MongoStore({ mongoose });
 
   client = new Client({
     authStrategy: new RemoteAuth({
-      store,
-      backupSyncIntervalMs: 300000, // Save session every 5 min
+      clientId: 'ishaanaa',
+      store: store,
+      backupSyncIntervalMs: 300000,
+      dataPath: path.resolve(__dirname, '.wwebjs_auth')
     }),
+    authTimeoutMs: 120000, // 2 minutes to authenticate
     puppeteer: {
       headless: true,
+      timeout: 120000, // 2 minutes to load the page
       // Use system Chromium installed by Dockerfile (set by PUPPETEER_EXECUTABLE_PATH env)
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       // Args tuned for Render free tier (low RAM, Linux container)
@@ -361,7 +379,7 @@ async function handleIncomingMessage(msg) {
 
     if (!text) return;
 
-    if (isFromManager) {
+    if (isFromManager || lower.startsWith('!')) {
       await handleManagerCommand(lower, text, replyJid);
       return;
     }
@@ -381,6 +399,10 @@ async function handleIncomingMessage(msg) {
       return;
     }
     if (lower === 'status' || lower === 'my status') {
+      if (!emp) {
+        await sendText(replyJid, `⚠️ I don't recognize your WhatsApp account. Please reply with: register YourName`);
+        return;
+      }
       const record = await db.getTodayRecord(emp._id);
       if (!record) {
         await sendText(replyJid, `📋 *${emp.name}* — No attendance recorded today yet.`);
@@ -475,23 +497,72 @@ async function handleLocation(phone, locationMsg, replyJid) {
 
 // ─── Manager Commands ─────────────────────────────────────────
 async function handleManagerCommand(lower, text, replyJid) {
-  if (lower === 'report' || lower === 'today') {
+  const cmd = lower.startsWith('!') ? lower.substring(1) : lower;
+
+  if (cmd === 'report' || cmd === 'today') {
     const report = await reports.todayTextReport();
     await sendText(replyJid, report);
     return;
   }
 
-  if (lower === 'status' || lower === 'live') {
+  if (lower.startsWith('!fixtoday')) {
+    const timeStr = text.substring(9).trim() || '10:00 AM';
+    const timeToSet = dayjs(timeStr, ['h:mm A', 'hh:mm A', 'H:mm', 'HH:mm']).format('hh:mm A');
+    
+    // Find all records for today
+    const today = dayjs().format('YYYY-MM-DD');
+    const records = await db.Attendance.find({ date: today });
+    let count = 0;
+    for (const record of records) {
+      if (record.status !== 'Leave' && record.status !== 'Holiday') {
+        record.check_in = timeToSet;
+        record.status = 'Present'; // Fix status if it was marked Late
+        await record.save();
+        count++;
+      }
+    }
+    await sendText(replyJid, `✅ Fixed today's check-in time to *${timeToSet}* for ${count} employees!`);
+    return;
+  }
+
+  if (cmd === 'status' || cmd === 'live') {
     const statusReport = await reports.statusTextReport();
     await sendText(replyJid, statusReport);
     return;
   }
 
-  if (lower === 'excel' || lower === 'sheet') {
+  if (cmd === 'excel' || cmd === 'sheet') {
     try {
-      await sendText(replyJid, '📊 Generating Excel report for this month...');
+      const MONTHS = ['january','february','march','april','may','june',
+                      'july','august','september','october','november','december'];
       const now = dayjs();
-      const filepath = await reports.generateMonthlyExcel(now.year(), now.month() + 1);
+      let year = now.year();
+      let month = now.month() + 1; // default: current month
+
+      // Check if user specified a month name, e.g. "!excel may", "!excel january", or "!excel last"
+      const parts = lower.split(/\s+/);
+      if (parts.length > 1) {
+        const monthArg = parts.slice(1).join(' ').trim();
+        
+        if (monthArg === 'last') {
+          month = now.month(); // now.month() is 0-indexed, so it perfectly represents last month (1-indexed)
+          if (month === 0) { // If currently January
+            month = 12; // Last month is December
+            year = year - 1; // Of the previous year
+          }
+        } else {
+          const monthIdx = MONTHS.findIndex(m => m.startsWith(monthArg));
+          if (monthIdx !== -1) {
+            month = monthIdx + 1;
+            // If the requested month is after the current month, it must be last year
+            if (month > now.month() + 1) year = year - 1;
+          }
+        }
+      }
+
+      const monthName = MONTHS[month - 1].charAt(0).toUpperCase() + MONTHS[month - 1].slice(1);
+      await sendText(replyJid, `📊 Generating Excel report for ${monthName} ${year}...`);
+      const filepath = await reports.generateMonthlyExcel(year, month);
       const filename = path.basename(filepath);
       
       const base64Data = fs.readFileSync(filepath).toString('base64');
@@ -500,7 +571,7 @@ async function handleManagerCommand(lower, text, replyJid) {
         base64Data,
         filename
       );
-      await client.sendMessage(replyJid, media, { caption: `📅 Attendance Report for ${now.format('MMMM YYYY')}` });
+      await client.sendMessage(replyJid, media, { caption: `📅 Attendance Report for ${monthName} ${year}` });
       
       // Cleanup
       setTimeout(() => fs.unlink(filepath, () => {}), 2000);
@@ -540,7 +611,7 @@ async function handleManagerCommand(lower, text, replyJid) {
     return;
   }
 
-  if (lower === 'help') {
+  if (cmd === 'help') {
     await sendText(replyJid,
       `🤖 *Manager Commands*\n\n` +
       `*report* — Today's attendance summary\n` +
@@ -561,10 +632,17 @@ function setupSchedules() {
   // Daily check-in reminder at 9:00 AM
   schedule.scheduleJob('0 9 * * 1-6', async () => {
     const employees = await db.getAllEmployees();
+    const messages = [
+      "🌅 Good morning {name}! Hope you have a wonderful and productive day today! ✨ Please share your live location to check in.",
+      "☀️ Rise and shine, {name}! Let's make today amazing! 🌸 Drop your live location to mark your attendance.",
+      "☕ Good morning {name}! Wishing you a day full of success and great energy! 💫 Please check in with your live location.",
+      "🌼 Happy morning {name}! Ready to create some beautiful designs today? ✂️ Send your live location to check in!"
+    ];
     for (const emp of employees) {
       const jid = '91' + emp.phone.replace(/\D/g, '').slice(-10) + '@c.us';
       try {
-        await sendText(jid, `🌅 Good morning ${emp.name}! Please share your location to mark attendance.`);
+        const msgText = messages[Math.floor(Math.random() * messages.length)].replace('{name}', emp.name);
+        await sendText(jid, msgText);
         await new Promise(r => setTimeout(r, 1000)); // 1s delay between messages
       } catch (_) {}
     }
