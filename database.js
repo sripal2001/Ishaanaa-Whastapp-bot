@@ -235,7 +235,7 @@ async function getLeaveByMsgId(msgId) {
   if (!leave) return null;
   return {
     ...leave._doc,
-    name: leave.employee_id.name
+    name: leave.employee_id ? leave.employee_id.name : 'Unknown (Deleted Employee)'
   };
 }
 
