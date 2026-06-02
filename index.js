@@ -497,7 +497,9 @@ async function handleLocation(phone, locationMsg, replyJid) {
 
 // ─── Manager Commands ─────────────────────────────────────────
 async function handleManagerCommand(lower, text, replyJid) {
-  const cmd = lower.startsWith('!') ? lower.substring(1) : lower;
+  // Extract just the first word as the command (ignoring the '!')
+  const cmdStr = lower.startsWith('!') ? lower.substring(1) : lower;
+  const cmd = cmdStr.split(/\s+/)[0];
 
   if (cmd === 'report' || cmd === 'today') {
     const report = await reports.todayTextReport();
