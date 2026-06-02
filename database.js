@@ -22,13 +22,73 @@ async function connect(uri) {
 
 // ─── Employee Queries ──────────────────────────────────────────
 async function upsertEmployees(employees) {
+  const currentNames = employees.map(e => e.name.trim().toLowerCase());
+  
+  // ── STEP 1: Raw MongoDB cleanup (bypass Mongoose to avoid index conflicts) ──
+  try {
+    const collection = mongoose.connection.db.collection('employees');
+    
+    // Drop the old (non-unique) name index if it exists, so we can create the unique one
+    try { await collection.dropIndex('name_1'); } catch (_) {}
+    
+    // Get ALL raw documents
+    const rawDocs = await collection.find({}).toArray();
+    const nameGroups = {};
+    
+    for (const doc of rawDocs) {
+      const norm = (doc.name || '').trim().toLowerCase();
+      
+      // Delete employees not in config.js
+      if (!currentNames.includes(norm)) {
+        await collection.deleteOne({ _id: doc._id });
+        console.log(`🗑️ Deleted unknown employee: ${doc.name}`);
+        continue;
+      }
+      
+      if (!nameGroups[norm]) nameGroups[norm] = [];
+      nameGroups[norm].push(doc);
+    }
+    
+    // For each name group, keep only the best one (prefer one with whatsapp_id)
+    for (const norm in nameGroups) {
+      const group = nameGroups[norm];
+      if (group.length > 1) {
+        const toKeep = group.find(d => d.whatsapp_id) || group[0];
+        for (const doc of group) {
+          if (doc._id.toString() !== toKeep._id.toString()) {
+            await collection.deleteOne({ _id: doc._id });
+            console.log(`🗑️ Deleted duplicate: ${doc.name} (kept ID ${toKeep._id})`);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('⚠️ Raw cleanup error (non-fatal):', err.message);
+  }
+  
+  // ── STEP 2: Ensure exactly the config.js employees exist ──
   for (const emp of employees) {
-    // Upsert by name so we don't recreate them if their phone ID changes (e.g. to an @lid)
-    await Employee.findOneAndUpdate(
-      { name: emp.name },
-      { $setOnInsert: { phone: emp.phone } }, // Only set phone if it's a new employee
-      { upsert: true, new: true }
-    );
+    const norm = emp.name.trim().toLowerCase();
+    const allCurrent = await Employee.find({});
+    const existing = allCurrent.find(e => e.name.trim().toLowerCase() === norm);
+
+    if (existing) {
+      if (existing.name !== emp.name) {
+        existing.name = emp.name;
+        await existing.save();
+      }
+    } else {
+      await Employee.create({ name: emp.name, phone: emp.phone });
+      console.log(`✅ Created employee: ${emp.name}`);
+    }
+  }
+  
+  // ── STEP 3: Rebuild unique index ──
+  try {
+    await Employee.syncIndexes();
+    console.log(`✅ Employee count: ${await Employee.countDocuments()} (expected: ${employees.length})`);
+  } catch (err) {
+    console.error('⚠️ Index sync error:', err.message);
   }
 }
 
@@ -62,7 +122,15 @@ async function getEmployeeByName(name) {
 }
 
 async function getAllEmployees() {
-  return await Employee.find({});
+  const all = await Employee.find({});
+  // Deduplicate by normalized name as safety net
+  const seen = new Set();
+  return all.filter(e => {
+    const norm = e.name.trim().toLowerCase();
+    if (seen.has(norm)) return false;
+    seen.add(norm);
+    return true;
+  });
 }
 
 // ─── Attendance Queries ───────────────────────────────────────
@@ -106,8 +174,18 @@ async function markAbsent(employeeId) {
 async function getTodayAttendance() {
   const today = dayjs().format('YYYY-MM-DD');
   const allEmps = await Employee.find({}).sort('name');
+  
+  // Deduplicate by normalized name — safety net against ghost duplicates
+  const seen = new Set();
+  const uniqueEmps = allEmps.filter(e => {
+    const norm = e.name.trim().toLowerCase();
+    if (seen.has(norm)) return false;
+    seen.add(norm);
+    return true;
+  });
+  
   const results = [];
-  for (const emp of allEmps) {
+  for (const emp of uniqueEmps) {
     const att = await Attendance.findOne({ employee_id: emp._id, date: today });
     results.push({
       name: emp.name,
@@ -124,10 +202,12 @@ async function getMonthAttendance(year, month) {
   const from = `${year}-${String(month).padStart(2, '0')}-01`;
   const to = `${year}-${String(month).padStart(2, '0')}-31`;
   const records = await Attendance.find({ date: { $gte: from, $lte: to } }).populate('employee_id');
-  return records.map(r => ({
-    name: r.employee_id.name,
-    date: r.date,
-    check_in: r.check_in,
+  return records
+    .filter(r => r.employee_id) // Filter out orphaned records
+    .map(r => ({
+      name: r.employee_id.name,
+      date: r.date,
+      check_in: r.check_in,
     check_out: r.check_out,
     hours_worked: r.hours_worked,
     status: r.status
@@ -175,6 +255,7 @@ async function clearPending(phone) {
 }
 
 module.exports = {
+  Employee, Attendance,
   connect,
   upsertEmployees, getEmployeeByWAId, getEmployeeByPhone, getEmployeeByName,
   linkWhatsappId, getAllEmployees,
