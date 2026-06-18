@@ -242,19 +242,19 @@ async function initWhatsApp() {
     authTimeoutMs: 120000, // 2 minutes to authenticate
     puppeteer: {
       headless: true,
-      timeout: 120000, // 2 minutes to load the page
+      timeout: 0, // 0 = Infinite timeout, prevents crashing if HF is slow
       // Use system Chromium installed by Dockerfile (set by PUPPETEER_EXECUTABLE_PATH env)
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-      // Args tuned for Render free tier (low RAM, Linux container)
+      // Args tuned for HF / Render free tier
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
-        '--no-zygote',
-        '--single-process', // Reduces RAM significantly
         '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--disable-extensions'
       ],
     },
   });
