@@ -142,11 +142,12 @@ async function getTodayRecord(employeeId) {
 async function checkIn(employeeId, time, status = 'Present') {
   const today = dayjs().format('YYYY-MM-DD');
   try {
-    const doc = new Attendance({ employee_id: employeeId, date: today, check_in: time, status: status });
-    await doc.save();
-    return doc;
+    return await Attendance.findOneAndUpdate(
+      { employee_id: employeeId, date: today },
+      { check_in: time, status: status },
+      { new: true, upsert: true }
+    );
   } catch (err) {
-    // If unique constraint fails, do nothing
     return null;
   }
 }
@@ -163,9 +164,11 @@ async function checkOut(employeeId, time, hoursWorked, status) {
 async function markAbsent(employeeId) {
   const today = dayjs().format('YYYY-MM-DD');
   try {
-    const doc = new Attendance({ employee_id: employeeId, date: today, status: 'Absent' });
-    await doc.save();
-    return doc;
+    return await Attendance.findOneAndUpdate(
+      { employee_id: employeeId, date: today },
+      { $setOnInsert: { status: 'Absent' } },
+      { new: true, upsert: true }
+    );
   } catch (err) {
     return null;
   }
