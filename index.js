@@ -240,6 +240,11 @@ async function initWhatsApp() {
       dataPath: path.resolve(__dirname, '.wwebjs_auth')
     }),
     authTimeoutMs: 120000, // 2 minutes to authenticate
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+    webVersionCache: {
+      type: 'remote',
+      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
+    },
     puppeteer: {
       headless: true,
       timeout: 0, // 0 = Infinite timeout, prevents crashing if HF is slow
