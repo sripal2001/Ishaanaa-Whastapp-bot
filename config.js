@@ -23,7 +23,6 @@ module.exports = {
 
   // Employee WhatsApp numbers (include country code, no + or spaces)
   EMPLOYEES: [
-    { name: 'Neha',       phone: '919121306498' },
     { name: 'Sharma',     phone: '919866986319' },
     { name: 'Tanusree',   phone: '919059915549' },
   ],
