@@ -224,11 +224,13 @@ async function initWhatsApp() {
   // Ensure MongoDB is connected before creating MongoStore
   await mongoose.connection.asPromise();
 
-  // Ensure auth folder exists
+  // Completely clear local auth folder to prevent EEXIST and locking crashes
+  // RemoteAuth will automatically restore it from MongoDB if a session exists
   const authPath = path.resolve(__dirname, '.wwebjs_auth');
-  if (!fs.existsSync(authPath)) {
-    fs.mkdirSync(authPath, { recursive: true });
+  if (fs.existsSync(authPath)) {
+    fs.rmSync(authPath, { recursive: true, force: true });
   }
+  fs.mkdirSync(authPath, { recursive: true });
 
   const store = new MongoStore({ mongoose });
 
